@@ -1,0 +1,61 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: label-portal-db
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-label_portal}
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: label-portal-backend
+    environment:
+      TZ: Asia/Shanghai
+      FLASK_ENV: production
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-dev_app_secret_key_please_change_this_to_random_32_chars}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev_jwt_secret_key_please_change_this_to_random_32_chars}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-Q8mCU8FlS8aM2O7uTvN9L0n8I4n7hDq8k1P7qQ6Kf-I=}
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
+      DB_NAME: ${MYSQL_DATABASE:-label_portal}
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-100}
+      MAX_LOGIN_ATTEMPTS: ${MAX_LOGIN_ATTEMPTS:-5}
+      LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-15}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - pages_data:/app/static/pages
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: label-portal-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
+volumes:
+  db_data:
+  pages_data:
