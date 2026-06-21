@@ -21,9 +21,30 @@ class Config:
     DB_NAME = os.getenv("DB_NAME", "label_portal")
 
     SQLALCHEMY_DATABASE_URI = (
-        f"mysql+pymysql://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
+        f"mysql+pymysql://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        f"?charset=utf8mb4&connect_timeout=10&read_timeout=30&write_timeout=30"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "pool_pre_ping": True,
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "20")),
+        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "40")),
+        "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),
+        "pool_use_lifo": True,
+        "connect_args": {
+            "connect_timeout": 10,
+            "read_timeout": 30,
+            "write_timeout": 30,
+        },
+        "execution_options": {
+            "isolation_level": "READ COMMITTED",
+        },
+    }
+
+    DB_QUERY_TIMEOUT = int(os.getenv("DB_QUERY_TIMEOUT", "30"))
+    DB_STATEMENT_TIMEOUT = int(os.getenv("DB_STATEMENT_TIMEOUT", "60"))
 
     ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "Q8mCU8FlS8aM2O7uTvN9L0n8I4n7hDq8k1P7qQ6Kf-I=")
 

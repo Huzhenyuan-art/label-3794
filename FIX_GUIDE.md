@@ -911,3 +911,213 @@ NameError: name 'page_group_association' is not defined
    - 如果是**变量对象** → 确保该 `db.Table` 在当前类上方定义
    - 如果是**字符串** → 确保目标表的 `__tablename__` 正确，且最终会被 SQLAlchemy 注册
 3. **推荐结构**：将所有独立模型按字母顺序或业务分组放在前面，将所有 `db.Table` 关联表集中放在独立模型之后、使用它们的模型之前。
+
+---
+
+## 七、MySQL 连接提前关闭导致 "MySQL server has gone away" 与 "Commands out of sync" 错误
+
+### 问题现象
+
+引入分组与标签模块后，在频繁执行数据库查询（尤其是分组/标签的多对多关联查询、门户首页的多条件联合筛选查询）时，出现以下错误：
+
+```
+OperationalError: (2006, 'MySQL server has gone away')
+OperationalError: (2013, 'Lost connection to MySQL server during query')
+ProgrammingError: Commands out of sync; you can't run this command now
+```
+
+错误通常发生在：
+- 应用空闲一段时间后的**首个请求**（MySQL `wait_timeout` 已关闭连接）
+- 执行**较复杂的 JOIN 查询**或**批量数据加载**（如 lazy="subquery" 的多对多关联）
+- **连续多个请求**之间共享了已失效的连接池连接
+
+### 根因分析
+
+#### 1. 未配置连接池核心参数
+
+原始配置仅设置了 `SQLALCHEMY_DATABASE_URI` 和 `SQLALCHEMY_TRACK_MODIFICATIONS`，其余全部使用 SQLAlchemy 的**默认值**，这些默认值并不适合生产环境：
+
+| 参数 | 默认值 | 问题 |
+|------|--------|------|
+| `pool_size` | 5 | 连接池过小，高并发时需要频繁创建新连接 |
+| `max_overflow` | 10 | 超出池容量的连接数限制过低 |
+| `pool_recycle` | -1（不回收） | 连接无限复用，MySQL `wait_timeout`（默认 8h）关闭后连接仍在池中 |
+| `pool_pre_ping` | False | 检出连接前不做健康检查，直接使用已失效连接 |
+| `pool_timeout` | 30 | 等待连接的超时设置可以，但配合 pool_size=5 容易排队 |
+
+#### 2. 未设置连接级超时参数
+
+PyMySQL 驱动层面未设置 `connect_timeout`、`read_timeout`、`write_timeout`，导致网络异常时连接长时间阻塞。
+
+#### 3. 分组/标签模块的查询特点放大了问题
+
+新模块的查询模式使连接失效问题暴露得更频繁：
+
+- **多对多关联查询（subquery 策略）**：一次请求触发多条 SQL，若中间某条 SQL 遇到失效连接即抛出错误
+- **门户首页联合筛选**：`group_id` + 多 `tag_ids` 组合成复杂的 EXISTS 子查询，执行时间较长
+- **CRUD 并发**：分组、标签、页面绑定多个管理操作同时进行，连接池竞争加剧
+
+#### 4. 缺少连接错误的专项处理
+
+原 `errors.py` 中只有通用的 `Exception` 处理，对：
+- `OperationalError`（连接级错误）
+- `DisconnectionError`（连接池断开）
+- `StatementError`（SQL 执行中途断开）
+
+等异常没有区分处理，也没有在检测到连接问题后**主动 rollback 并 remove session**，导致失效会话被后续请求复用，出现 "Commands out of sync"。
+
+### 修复方案
+
+#### 一、配置层：完善连接池与超时参数
+
+**文件**：`backend/app/config.py`
+
+1. **在 DATABASE_URI 中追加驱动级超时参数**：
+
+   ```python
+   SQLALCHEMY_DATABASE_URI = (
+       f"mysql+pymysql://{DB_USER}:{quote_plus(DB_PASSWORD)}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+       f"?charset=utf8mb4&connect_timeout=10&read_timeout=30&write_timeout=30"
+   )
+   ```
+
+2. **新增 `SQLALCHEMY_ENGINE_OPTIONS`，配置完整连接池**：
+
+   ```python
+   SQLALCHEMY_ENGINE_OPTIONS = {
+       "pool_pre_ping": True,                        # 检出连接前执行 SELECT 1 做健康检查
+       "pool_recycle": 1800,                         # 连接最大存活 30 分钟（远小于 MySQL 默认 8h）
+       "pool_size": 20,                              # 常驻连接数 20
+       "max_overflow": 40,                           # 峰值可额外创建 40 个连接，总上限 60
+       "pool_timeout": 30,                           # 等待空闲连接的超时时间
+       "pool_use_lifo": True,                        # 使用 LIFO（后进先出）减少活跃连接数
+       "connect_args": {                             # 驱动层超时参数（双保险，与 URI 中一致）
+           "connect_timeout": 10,
+           "read_timeout": 30,
+           "write_timeout": 30,
+       },
+       "execution_options": {
+           "isolation_level": "READ COMMITTED",      # 使用更合理的隔离级别
+       },
+   }
+   ```
+
+3. **新增查询超时配置项**：
+
+   ```python
+   DB_QUERY_TIMEOUT = 30      # 单条查询超时（秒）
+   DB_STATEMENT_TIMEOUT = 60  # 语句级总超时（秒）
+   ```
+
+**关键参数说明**：
+
+- `pool_pre_ping=True`：这是**解决 "server has gone away" 的核心**。每次从池中取连接时，自动发送 `SELECT 1` 验证有效性，失效则丢弃并创建新连接
+- `pool_recycle=1800`：连接使用 30 分钟后强制丢弃重建，确保永远不会碰到 MySQL 默认 8 小时的 `wait_timeout`
+- `pool_use_lifo=True`：优先使用最近归还的连接，提高连接"热度"，减少处于空闲状态的连接数量
+
+#### 二、机制层：新增数据库服务模块
+
+**新建文件**：`backend/app/database_service.py`
+
+提供以下核心能力：
+
+1. **连接错误检测函数 `is_connection_error()`**：
+   - 使用正则匹配 7 种典型的连接错误消息（MySQL server has gone away / Lost connection / Connection refused / Commands out of sync 等）
+   - 类型判断 + 字符串匹配双重保险
+
+2. **带重试机制的安全执行函数 `safe_db_execute()`**：
+   ```
+   检测到连接错误 → rollback → remove session → 指数退避等待 → 重试（最多 3 次）
+   ```
+   重试用例：适合分组/标签等模块的关键查询，在连接临时抖动时自动恢复
+
+3. **健康检查函数 `ping_db()`**：
+   - 执行 `SELECT 1` 验证当前连接
+   - 失败则自动 rollback + remove session，返回 False
+
+4. **SQLAlchemy 事件监听器 `register_db_event_listeners()`**：
+   - **connect 事件**：每个新连接建立后，执行 `SET SESSION wait_timeout = 28800`（8 小时）、`net_read_timeout = 60`、`net_write_timeout = 60`，确保 MySQL 服务端不会过早关闭我们的连接
+   - **checkout/checkin/close 事件**：记录详细日志并统计每个连接的检出次数，便于诊断连接泄漏
+
+#### 三、应用层：请求生命周期钩子
+
+**文件**：`backend/app/__init__.py`
+
+1. 在 `create_app()` 中注册数据库事件监听器
+2. 新增 `before_request` 钩子（GET/HEAD 请求）：每次请求前调用 `ping_db()`，**预热连接**，避免真正的业务 SQL 碰到失效连接
+3. 新增 `teardown_request` 钩子：检测到连接异常时主动 rollback，**每次请求结束强制 `db.session.remove()`**，确保会话不会被复用
+
+#### 四、错误层：专项异常处理器
+
+**文件**：`backend/app/errors.py`
+
+新增 4 个 SQLAlchemy 专属错误处理器：
+
+| 异常类型 | 返回状态码 | 错误码 | 处理动作 |
+|----------|-----------|--------|---------|
+| `OperationalError`（连接类） | 503 | `DB_CONNECTION_ERROR` | rollback + remove session，提示"稍后重试" |
+| `OperationalError`（非连接类） | 500 | - | 普通数据库错误，不清理会话 |
+| `DisconnectionError` | 503 | `DB_DISCONNECTED` | 连接池层断连，rollback + remove |
+| `StatementError`（连接类） | 503 | `DB_STATEMENT_INTERRUPTED` | SQL 执行中途断开，提示"数据可能未保存，请重试" |
+| `StatementError`（非连接类） | 500 | - | 记录语句与参数便于排查 |
+| 任意 `Exception`（匹配连接错误特征） | 503 | `DB_GENERIC_CONNECTION_ERROR` | 兜底保护 |
+
+所有连接类错误均执行：**完整日志 + rollback + remove session**，防止失效会话污染后续请求。
+
+#### 五、日志层：结构化日志与文件输出
+
+**文件**：`backend/app/logging_config.py`
+
+1. 新增 `RotatingFileHandler`，日志写入 `backend/logs/app.log`（单文件 10MB，保留 10 份）
+2. 显式设置 SQLAlchemy 子 logger 级别：
+   - `sqlalchemy.engine` = WARNING（避免大量 SQL 日志刷屏）
+   - `sqlalchemy.pool` = INFO（记录连接池行为，便于诊断连接问题）
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `backend/app/config.py` | 新增 `SQLALCHEMY_ENGINE_OPTIONS` 连接池配置、URI 追加超时参数、新增 `DB_QUERY_TIMEOUT` 等 |
+| `backend/app/database_service.py` | **新建**：连接错误检测、安全重试执行、健康检查、SQLAlchemy 事件监听器 |
+| `backend/app/__init__.py` | 注册数据库事件监听器、新增请求前健康检查、请求结束时清理会话 |
+| `backend/app/errors.py` | 新增 `OperationalError`、`DisconnectionError`、`StatementError` 三类错误的专项处理器 |
+| `backend/app/logging_config.py` | 新增文件日志、调整 SQLAlchemy 子 logger 级别 |
+
+### 验证方法
+
+1. **配置加载验证**：
+   ```bash
+   cd backend
+   python -c "from app import create_app; app = create_app(); print(app.config['SQLALCHEMY_ENGINE_OPTIONS'])"
+   ```
+   应输出包含 `pool_pre_ping=True`、`pool_recycle=1800` 等参数的字典。
+
+2. **连接建立验证**：
+   启动应用后查看日志，应能看到：
+   - `"新数据库连接已建立"` + `"数据库会话超时参数已设置"`（connect 事件触发）
+   - `"数据库事件监听器注册成功"`（初始化日志）
+
+3. **空闲超时模拟验证**：
+   - 启动应用后执行一次数据库操作
+   - 模拟 MySQL 侧强制关闭连接（如 `KILL` 对应进程，或重启 MySQL）
+   - 再次发起请求：在 `pool_pre_ping=True` 保护下，**不会返回 503**，而是自动丢弃旧连接并创建新连接
+
+4. **日志验证**：
+   确认 `backend/logs/app.log` 文件已生成，且包含连接相关日志。
+
+5. **分组/标签模块压测**：
+   - 连续 10 分钟内频繁访问：分组列表、标签列表、门户首页联合筛选
+   - 检查是否出现连接类错误；若有，检查日志是否正确记录并尝试了重试
+
+### 预防措施
+
+1. **连接池配置规范**：所有数据库连接配置**必须显式设置**，不得依赖 SQLAlchemy 默认值
+2. **`pool_pre_ping` 必须开启**：这是防止 "server has gone away" 的最低成本解决方案
+3. **`pool_recycle` 必须小于 MySQL `wait_timeout`**：建议为 MySQL 超时值的 1/4 ~ 1/2
+4. **每个 Flask 应用都应实现**：
+   - `teardown_request` 中调用 `db.session.remove()`
+   - 连接类错误的专项 errorhandler（503 + 清理会话）
+5. **生产环境建议额外配合**：
+   - 在 MySQL 配置中将 `wait_timeout` 调高至 28800（8 小时）
+   - 使用 ProxySQL 或 HAProxy 等中间件做数据库连接代理
+   - 监控数据库连接数、活跃连接数、连接池检出等待时间等指标

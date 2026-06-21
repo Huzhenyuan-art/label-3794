@@ -3,6 +3,7 @@ import os
 from flask import Flask, jsonify, send_from_directory
 
 from .config import Config
+from .database_service import register_db_event_listeners
 from .errors import register_error_handlers
 from .extensions import db, jwt
 from .logging_config import setup_logging
@@ -38,6 +39,44 @@ def create_app() -> Flask:
     app.register_blueprint(admin_groups_tags_bp)
     app.register_blueprint(public_bp)
     app.register_blueprint(data_api_bp)
+
+    with app.app_context():
+        try:
+            register_db_event_listeners()
+            app.logger.info("数据库事件监听器注册成功")
+        except Exception as exc:
+            app.logger.warning("注册数据库事件监听器失败：%s", exc)
+
+    @app.before_request
+    def _db_health_check_before_request():
+        from .database_service import ping_db
+
+        try:
+            from flask import request
+
+            if request.method in ("GET", "HEAD"):
+                if not ping_db():
+                    app.logger.warning("请求前数据库连接异常，已尝试重建会话")
+        except Exception:
+            pass
+
+    @app.teardown_request
+    def _remove_db_session(exc=None):
+        if exc is not None:
+            from .database_service import is_connection_error
+
+            if is_connection_error(exc):
+                app.logger.error(
+                    "检测到数据库连接错误，清理会话：%s", exc
+                )
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+        try:
+            db.session.remove()
+        except Exception:
+            pass
 
     @app.get("/health")
     def health_check():
