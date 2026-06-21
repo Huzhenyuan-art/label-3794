@@ -5,7 +5,9 @@ import NotificationCenter from '../components/NotificationCenter';
 import { clearAuth, getAccessToken } from '../services/auth';
 import http, { extractErrorMessage } from '../services/http';
 import BusinessPagesPanel from './admin/BusinessPagesPanel';
+import GroupsPanel from './admin/GroupsPanel';
 import SettingsPanel from './admin/SettingsPanel';
+import TagsPanel from './admin/TagsPanel';
 import UsersPanel from './admin/UsersPanel';
 
 const { Header, Sider, Content } = Layout;
@@ -13,6 +15,8 @@ const { Text } = Typography;
 
 const menuItems = [
   { key: 'pages', label: '业务页面管理' },
+  { key: 'groups', label: '分组管理' },
+  { key: 'tags', label: '标签管理' },
   { key: 'users', label: '用户管理' },
   { key: 'settings', label: '系统设置 / SQL 查询' },
 ];
@@ -24,6 +28,12 @@ function AdminDashboardPage() {
   const [admin, setAdmin] = useState(null);
 
   const panel = useMemo(() => {
+    if (selectedKey === 'groups') {
+      return <GroupsPanel />;
+    }
+    if (selectedKey === 'tags') {
+      return <TagsPanel />;
+    }
     if (selectedKey === 'users') {
       return <UsersPanel />;
     }

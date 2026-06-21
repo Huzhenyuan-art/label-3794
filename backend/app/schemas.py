@@ -137,3 +137,50 @@ class SqlExecPayload(BaseModel):
         if any(token in normalized for token in unsafe_tokens):
             raise ValueError("SQL 语句包含禁止关键字")
         return value
+
+
+class GroupCreatePayload(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=255)
+    sort_order: int = Field(default=0, ge=0)
+
+
+class GroupUpdatePayload(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=255)
+    sort_order: int | None = Field(default=None, ge=0)
+    status: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if value not in {"enabled", "disabled"}:
+            raise ValueError("status 仅支持 enabled/disabled")
+        return value
+
+
+class TagCreatePayload(BaseModel):
+    name: str = Field(min_length=1, max_length=32)
+    color: str = Field(default="blue", max_length=16)
+
+
+class TagUpdatePayload(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=32)
+    color: str | None = Field(default=None, max_length=16)
+    status: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if value not in {"enabled", "disabled"}:
+            raise ValueError("status 仅支持 enabled/disabled")
+        return value
+
+
+class PageGroupTagBindPayload(BaseModel):
+    group_ids: list[int] = Field(default_factory=list)
+    tag_ids: list[int] = Field(default_factory=list)

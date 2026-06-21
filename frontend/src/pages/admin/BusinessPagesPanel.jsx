@@ -1,6 +1,7 @@
 import {
   Button,
   Card,
+  Checkbox,
   Form,
   Input,
   Modal,
@@ -21,14 +22,19 @@ const { TextArea } = Input;
 function BusinessPagesPanel() {
   const [loading, setLoading] = useState(false);
   const [pages, setPages] = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [tags, setTags] = useState([]);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [bindOpen, setBindOpen] = useState(false);
   const [editingPage, setEditingPage] = useState(null);
+  const [bindingPage, setBindingPage] = useState(null);
   const [uploadFile, setUploadFile] = useState(null);
 
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
+  const [bindForm] = Form.useForm();
 
   const fetchPages = async () => {
     setLoading(true);
@@ -42,8 +48,28 @@ function BusinessPagesPanel() {
     }
   };
 
+  const fetchGroups = async () => {
+    try {
+      const { data } = await http.get('/api/admin/groups', { params: { status: 'enabled' } });
+      setGroups(data.data || []);
+    } catch (error) {
+      message.error(extractErrorMessage(error));
+    }
+  };
+
+  const fetchTags = async () => {
+    try {
+      const { data } = await http.get('/api/admin/tags', { params: { status: 'enabled' } });
+      setTags(data.data || []);
+    } catch (error) {
+      message.error(extractErrorMessage(error));
+    }
+  };
+
   useEffect(() => {
     fetchPages();
+    fetchGroups();
+    fetchTags();
   }, []);
 
   const handleCreate = async () => {
@@ -119,6 +145,34 @@ function BusinessPagesPanel() {
     }
   };
 
+  const openBind = (page) => {
+    setBindingPage(page);
+    bindForm.setFieldsValue({
+      group_ids: page.groups ? page.groups.map((g) => g.id) : [],
+      tag_ids: page.tags ? page.tags.map((t) => t.id) : [],
+    });
+    setBindOpen(true);
+  };
+
+  const handleBind = async () => {
+    try {
+      const values = await bindForm.validateFields();
+      await http.put(`/api/admin/pages/${bindingPage.id}/groups-tags`, {
+        group_ids: values.group_ids || [],
+        tag_ids: values.tag_ids || [],
+      });
+      setBindOpen(false);
+      setBindingPage(null);
+      message.success('分组与标签绑定成功');
+      fetchPages();
+    } catch (error) {
+      if (error?.errorFields) {
+        return;
+      }
+      message.error(extractErrorMessage(error));
+    }
+  };
+
   const toggleStatus = async (page, enabled) => {
     try {
       await http.patch(`/api/admin/pages/${page.id}/status`, {
@@ -172,9 +226,43 @@ function BusinessPagesPanel() {
       render: (value) => <Tag color="blue">{value}</Tag>,
     },
     {
+      title: '所属分组',
+      dataIndex: 'groups',
+      width: 180,
+      render: (value) =>
+        value && value.length ? (
+          <Space wrap>
+            {value.map((g) => (
+              <Tag key={g.id} color="geekblue">
+                {g.name}
+              </Tag>
+            ))}
+          </Space>
+        ) : (
+          '-'
+        ),
+    },
+    {
+      title: '标签',
+      dataIndex: 'tags',
+      width: 200,
+      render: (value) =>
+        value && value.length ? (
+          <Space wrap>
+            {value.map((t) => (
+              <Tag key={t.id} color={t.color}>
+                {t.name}
+              </Tag>
+            ))}
+          </Space>
+        ) : (
+          '-'
+        ),
+    },
+    {
       title: '访问路由',
       dataIndex: 'route_path',
-      width: 230,
+      width: 200,
       render: (value) => (
         <a href={value} target="_blank" rel="noreferrer">
           {value}
@@ -184,7 +272,7 @@ function BusinessPagesPanel() {
     {
       title: '状态',
       dataIndex: 'status',
-      width: 120,
+      width: 100,
       render: (_, record) => (
         <Switch checked={record.status === 'enabled'} onChange={(checked) => toggleStatus(record, checked)} />
       ),
@@ -192,17 +280,21 @@ function BusinessPagesPanel() {
     {
       title: '添加时间',
       dataIndex: 'created_at',
-      width: 180,
+      width: 160,
       render: (value) => formatDate(value),
     },
     {
       title: '操作',
       key: 'actions',
-      width: 240,
+      width: 280,
+      fixed: 'right',
       render: (_, record) => (
         <Space>
           <Button size="small" onClick={() => openEdit(record)}>
             编辑
+          </Button>
+          <Button size="small" onClick={() => openBind(record)}>
+            绑定分组/标签
           </Button>
           <Button size="small" onClick={() => resetToken(record)}>
             重置Token
@@ -226,7 +318,7 @@ function BusinessPagesPanel() {
         </Button>
       }
     >
-      <Table rowKey="id" loading={loading} columns={columns} dataSource={pages} scroll={{ x: 1200 }} />
+      <Table rowKey="id" loading={loading} columns={columns} dataSource={pages} scroll={{ x: 1600 }} />
 
       <Modal
         title="新增业务页面"
@@ -311,6 +403,42 @@ function BusinessPagesPanel() {
           </Form.Item>
           <Form.Item name="developer" label="开发者" rules={[{ required: true, message: '请输入开发者' }]}>
             <Input />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={bindingPage ? `绑定分组与标签 - ${bindingPage.name}` : '绑定分组与标签'}
+        open={bindOpen}
+        onCancel={() => setBindOpen(false)}
+        onOk={handleBind}
+        okText="保存"
+        cancelText="取消"
+        width={560}
+        destroyOnClose
+      >
+        <Form form={bindForm} layout="vertical">
+          <Form.Item name="group_ids" label="选择分组（可多选）">
+            <Checkbox.Group style={{ width: '100%' }}>
+              <Space wrap>
+                {groups.map((g) => (
+                  <Checkbox key={g.id} value={g.id}>
+                    {g.name}
+                  </Checkbox>
+                ))}
+              </Space>
+            </Checkbox.Group>
+          </Form.Item>
+          <Form.Item name="tag_ids" label="选择标签（可多选）">
+            <Checkbox.Group style={{ width: '100%' }}>
+              <Space wrap>
+                {tags.map((t) => (
+                  <Checkbox key={t.id} value={t.id}>
+                    <Tag color={t.color}>{t.name}</Tag>
+                  </Checkbox>
+                ))}
+              </Space>
+            </Checkbox.Group>
           </Form.Item>
         </Form>
       </Modal>

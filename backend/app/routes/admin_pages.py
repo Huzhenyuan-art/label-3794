@@ -8,8 +8,8 @@ from sqlalchemy import text
 
 from ..errors import ApiError
 from ..extensions import db
-from ..models import BusinessPage, DbConfig, SystemSetting
-from ..schemas import PageCreatePayload, PageUpdatePayload
+from ..models import BusinessPage, DbConfig, PageGroup, PageTag, SystemSetting
+from ..schemas import PageCreatePayload, PageGroupTagBindPayload, PageUpdatePayload
 from ..security import admin_required, generate_api_token, hash_token
 from ..services.dynamic_table_service import drop_dynamic_table, ensure_dynamic_table
 from ..services.notification_service import NOTIFICATION_TYPES, create_notification
@@ -36,6 +36,8 @@ def _serialize_page(page: BusinessPage) -> dict:
         "uploader_admin_id": page.uploader_admin_id,
         "created_at": to_iso(page.created_at),
         "updated_at": to_iso(page.updated_at),
+        "groups": [{"id": g.id, "name": g.name} for g in page.groups],
+        "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in page.tags],
     }
 
 
@@ -280,3 +282,25 @@ def delete_page(page_id: int):
         db.session.rollback()
 
     return jsonify(json_success(message="页面删除成功"))
+
+
+@bp.put("/<int:page_id>/groups-tags")
+@admin_required(require_csrf=True)
+def bind_page_groups_tags(page_id: int):
+    payload = PageGroupTagBindPayload.model_validate(request.get_json(silent=True) or {})
+    page = BusinessPage.query.get(page_id)
+    if not page:
+        raise ApiError(404, "业务页面不存在")
+
+    groups = PageGroup.query.filter(PageGroup.id.in_(payload.group_ids)).all() if payload.group_ids else []
+    if len(groups) != len(payload.group_ids):
+        raise ApiError(400, "存在无效的分组 ID")
+
+    tags = PageTag.query.filter(PageTag.id.in_(payload.tag_ids)).all() if payload.tag_ids else []
+    if len(tags) != len(payload.tag_ids):
+        raise ApiError(400, "存在无效的标签 ID")
+
+    page.groups = groups
+    page.tags = tags
+    db.session.commit()
+    return jsonify(json_success(_serialize_page(page), "分组与标签绑定成功"))

@@ -4,6 +4,7 @@ import {
   RocketOutlined,
   SearchOutlined,
   SettingOutlined,
+  TagsOutlined,
   UserOutlined,
 } from '@ant-design/icons';
 import {
@@ -17,6 +18,7 @@ import {
   Select,
   Skeleton,
   Space,
+  Tabs,
   Tag,
   Typography,
   message,
@@ -29,12 +31,10 @@ import { formatDate } from '../utils/date';
 const { Header, Content, Footer } = Layout;
 const { Title, Paragraph, Text } = Typography;
 
-/* 分类随机配色 */
-const CATEGORY_COLORS = [
-  'blue', 'geekblue', 'cyan', 'purple', 'magenta', 'volcano', 'gold', 'green', 'lime',
-];
-
 function colorForCategory(cat) {
+  const CATEGORY_COLORS = [
+    'blue', 'geekblue', 'cyan', 'purple', 'magenta', 'volcano', 'gold', 'green', 'lime',
+  ];
   let hash = 0;
   for (let i = 0; i < cat.length; i++) {
     hash = cat.charCodeAt(i) + ((hash << 5) - hash);
@@ -45,11 +45,13 @@ function colorForCategory(cat) {
 function HomePage() {
   const navigate = useNavigate();
   const [pages, setPages] = useState([]);
-  const [categories, setCategories] = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [allTags, setAllTags] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const [search, setSearch] = useState('');
-  const [category, setCategory] = useState('');
+  const [activeGroupId, setActiveGroupId] = useState('all');
+  const [selectedTagIds, setSelectedTagIds] = useState([]);
   const [timeSort, setTimeSort] = useState('newest');
 
   const pageCountLabel = useMemo(() => `已发布 ${pages.length} 个功能`, [pages.length]);
@@ -57,13 +59,17 @@ function HomePage() {
   const fetchPages = async () => {
     setLoading(true);
     try {
-      const { data } = await http.get('/api/public/pages', {
-        params: {
-          search,
-          category,
-          time_sort: timeSort,
-        },
-      });
+      const params = {
+        search,
+        time_sort: timeSort,
+      };
+      if (activeGroupId !== 'all') {
+        params.group_id = activeGroupId;
+      }
+      if (selectedTagIds.length > 0) {
+        params.tag_ids = selectedTagIds.join(',');
+      }
+      const { data } = await http.get('/api/public/pages', { params });
       setPages(data.data || []);
     } catch (error) {
       message.error(extractErrorMessage(error));
@@ -72,22 +78,50 @@ function HomePage() {
     }
   };
 
-  const fetchCategories = async () => {
+  const fetchGroups = async () => {
     try {
-      const { data } = await http.get('/api/public/categories');
-      setCategories(data.data || []);
+      const { data } = await http.get('/api/public/groups');
+      setGroups(data.data || []);
     } catch {
-      setCategories([]);
+      setGroups([]);
+    }
+  };
+
+  const fetchTags = async () => {
+    try {
+      const { data } = await http.get('/api/public/tags');
+      setAllTags(data.data || []);
+    } catch {
+      setAllTags([]);
     }
   };
 
   useEffect(() => {
-    fetchCategories();
+    fetchGroups();
+    fetchTags();
   }, []);
 
   useEffect(() => {
     fetchPages();
-  }, [search, category, timeSort]);
+  }, [search, activeGroupId, selectedTagIds, timeSort]);
+
+  const tabItems = useMemo(() => {
+    const items = [{ key: 'all', label: '全部' }];
+    groups.forEach((g) => {
+      items.push({ key: String(g.id), label: g.name });
+    });
+    return items;
+  }, [groups]);
+
+  const toggleTag = (tagId) => {
+    setSelectedTagIds((prev) =>
+      prev.includes(tagId) ? prev.filter((id) => id !== tagId) : [...prev, tagId]
+    );
+  };
+
+  const clearTagFilter = () => {
+    setSelectedTagIds([]);
+  };
 
   return (
     <Layout className="portal-layout">
@@ -115,7 +149,6 @@ function HomePage() {
       </Header>
 
       <Content className="portal-content">
-        {/* 顶部统计横幅 */}
         <div className="portal-banner">
           <div className="portal-banner-content">
             <Title level={2} style={{ margin: 0, color: '#fff', fontWeight: 700 }}>
@@ -127,7 +160,6 @@ function HomePage() {
           </div>
         </div>
 
-        {/* 筛选栏 */}
         <Card className="filter-card" bordered={false}>
           <Row gutter={[16, 12]} align="middle">
             <Col xs={24} sm={24} md={8}>
@@ -142,16 +174,6 @@ function HomePage() {
                   }
                 }}
                 style={{ width: '100%' }}
-              />
-            </Col>
-            <Col xs={12} sm={12} md={6}>
-              <Select
-                placeholder="按业务分类筛选"
-                value={category || undefined}
-                allowClear
-                onChange={(value) => setCategory(value || '')}
-                style={{ width: '100%' }}
-                options={categories.map((item) => ({ value: item, label: item }))}
               />
             </Col>
             <Col xs={12} sm={12} md={6}>
@@ -171,7 +193,39 @@ function HomePage() {
           </Row>
         </Card>
 
-        {/* 功能卡片列表 */}
+        <Card className="filter-card" bordered={false} style={{ marginBottom: 16 }}>
+          <Tabs
+            activeKey={activeGroupId}
+            onChange={setActiveGroupId}
+            items={tabItems}
+            size="large"
+            style={{ marginBottom: 8 }}
+          />
+          {allTags.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <TagsOutlined style={{ color: '#8c9ab5' }} />
+              <Text type="secondary" style={{ fontSize: 13 }}>标签筛选：</Text>
+              {allTags.map((tag) => (
+                <Tag.CheckableTag
+                  key={tag.id}
+                  checked={selectedTagIds.includes(tag.id)}
+                  onChange={() => toggleTag(tag.id)}
+                  style={{ marginInlineEnd: 0 }}
+                >
+                  <span style={{ color: selectedTagIds.includes(tag.id) ? '#fff' : undefined }}>
+                    {tag.name}
+                  </span>
+                </Tag.CheckableTag>
+              ))}
+              {selectedTagIds.length > 0 && (
+                <Button type="link" size="small" onClick={clearTagFilter}>
+                  清除筛选
+                </Button>
+              )}
+            </div>
+          )}
+        </Card>
+
         {loading ? (
           <Row gutter={[20, 20]}>
             {[1, 2, 3, 4, 5, 6].map((item) => (
@@ -206,6 +260,18 @@ function HomePage() {
                   <Paragraph className="card-desc" ellipsis={{ rows: 3 }}>
                     {page.description}
                   </Paragraph>
+
+                  {page.tags && page.tags.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <Space wrap>
+                        {page.tags.map((t) => (
+                          <Tag key={t.id} color={t.color}>
+                            {t.name}
+                          </Tag>
+                        ))}
+                      </Space>
+                    </div>
+                  )}
 
                   <div className="card-meta">
                     <Space size={16}>

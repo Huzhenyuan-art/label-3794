@@ -57,6 +57,8 @@ class BusinessPage(db.Model):
     updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
 
     uploader = db.relationship("Admin", lazy=True)
+    groups = db.relationship("PageGroup", secondary=page_group_association, lazy="subquery")
+    tags = db.relationship("PageTag", secondary=page_tag_association, lazy="subquery")
 
 
 class DbConfig(db.Model):
@@ -108,3 +110,39 @@ class Notification(db.Model):
     read_at = db.Column(db.DateTime, nullable=True)
 
     admin = db.relationship("Admin", lazy=True)
+
+
+class PageGroup(db.Model):
+    __tablename__ = "page_groups"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    description = db.Column(db.String(255), nullable=True)
+    sort_order = db.Column(db.Integer, nullable=False, default=0, index=True)
+    status = db.Column(db.String(16), nullable=False, default="enabled", index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=beijing_now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
+
+
+class PageTag(db.Model):
+    __tablename__ = "page_tags"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(32), nullable=False, unique=True, index=True)
+    color = db.Column(db.String(16), nullable=False, default="blue")
+    status = db.Column(db.String(16), nullable=False, default="enabled", index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=beijing_now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
+
+
+page_group_association = db.Table(
+    "page_group_association",
+    db.Column("page_id", db.Integer, db.ForeignKey("business_pages.id"), primary_key=True),
+    db.Column("group_id", db.Integer, db.ForeignKey("page_groups.id"), primary_key=True),
+)
+
+page_tag_association = db.Table(
+    "page_tag_association",
+    db.Column("page_id", db.Integer, db.ForeignKey("business_pages.id"), primary_key=True),
+    db.Column("tag_id", db.Integer, db.ForeignKey("page_tags.id"), primary_key=True),
+)
