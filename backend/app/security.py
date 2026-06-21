@@ -65,3 +65,24 @@ def admin_required(require_csrf: bool = False):
         return wrapped
 
     return decorator
+
+
+def user_required(require_csrf: bool = False):
+    def decorator(func):
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            verify_jwt_in_request()
+            claims = get_jwt()
+            if claims.get("role") != "user":
+                raise ApiError(403, "需要普通用户权限")
+
+            if require_csrf and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+                csrf_header = request.headers.get("X-CSRF-Token", "")
+                if not csrf_header or csrf_header != claims.get("csrf"):
+                    raise ApiError(403, "CSRF 校验失败")
+
+            return func(*args, **kwargs)
+
+        return wrapped
+
+    return decorator

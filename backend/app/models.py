@@ -36,6 +36,13 @@ class User(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=beijing_now)
     updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
 
+    authorized_pages = db.relationship(
+        "BusinessPage",
+        secondary=user_page_association,
+        lazy="selectin",
+        backref=db.backref("authorized_users", lazy="selectin"),
+    )
+
 
 class DbConfig(db.Model):
     __tablename__ = "db_config"
@@ -121,6 +128,13 @@ page_tag_association = db.Table(
     "page_tag_association",
     db.Column("page_id", db.Integer, db.ForeignKey("business_pages.id"), primary_key=True),
     db.Column("tag_id", db.Integer, db.ForeignKey("page_tags.id"), primary_key=True),
+)
+
+
+user_page_association = db.Table(
+    "user_page_association",
+    db.Column("user_id", db.Integer, db.ForeignKey("user.id"), primary_key=True),
+    db.Column("page_id", db.Integer, db.ForeignKey("business_pages.id"), primary_key=True),
 )
 
 

@@ -107,6 +107,19 @@ class ChangePasswordPayload(BaseModel):
     new_password: str = Field(min_length=6, max_length=128)
 
 
+class UserProfileUpdatePayload(BaseModel):
+    display_name: str | None = Field(default=None, max_length=64)
+
+
+class UserChangePasswordPayload(BaseModel):
+    old_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+class UserAuthorizedPagesPayload(BaseModel):
+    page_ids: list[int] = Field(default_factory=list)
+
+
 class DbConfigPayload(BaseModel):
     host: str = Field(min_length=1, max_length=128)
     port: int = Field(ge=1, le=65535)

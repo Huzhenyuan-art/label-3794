@@ -2,8 +2,8 @@ from flask import Blueprint, jsonify, request
 
 from ..errors import ApiError
 from ..extensions import db
-from ..models import User
-from ..schemas import UserCreatePayload, UserUpdatePayload
+from ..models import BusinessPage, User
+from ..schemas import UserAuthorizedPagesPayload, UserCreatePayload, UserUpdatePayload
 from ..security import admin_required, hash_password
 from ..utils import json_success, to_iso
 
@@ -20,6 +20,7 @@ def _serialize_user(user: User) -> dict:
         "last_login_at": to_iso(user.last_login_at),
         "created_at": to_iso(user.created_at),
         "updated_at": to_iso(user.updated_at),
+        "authorized_page_ids": [p.id for p in user.authorized_pages],
     }
 
 
@@ -78,3 +79,51 @@ def delete_user(user_id: int):
     db.session.delete(user)
     db.session.commit()
     return jsonify(json_success(message="用户删除成功"))
+
+
+@bp.get("/<int:user_id>/authorized-pages")
+@admin_required()
+def get_user_authorized_pages(user_id: int):
+    user = User.query.get(user_id)
+    if not user:
+        raise ApiError(404, "用户不存在")
+
+    def _simple_page(page: BusinessPage) -> dict:
+        return {
+            "id": page.id,
+            "name": page.name,
+            "description": page.description,
+            "category": page.category,
+            "status": page.status,
+            "route_path": page.route_path,
+        }
+
+    all_pages = BusinessPage.query.order_by(BusinessPage.created_at.desc()).all()
+    authorized_ids = {p.id for p in user.authorized_pages}
+
+    return jsonify(
+        json_success(
+            {
+                "all_pages": [_simple_page(p) for p in all_pages],
+                "authorized_page_ids": list(authorized_ids),
+            }
+        )
+    )
+
+
+@bp.put("/<int:user_id>/authorized-pages")
+@admin_required(require_csrf=True)
+def update_user_authorized_pages(user_id: int):
+    user = User.query.get(user_id)
+    if not user:
+        raise ApiError(404, "用户不存在")
+
+    payload = UserAuthorizedPagesPayload.model_validate(request.get_json(silent=True) or {})
+    pages = BusinessPage.query.filter(BusinessPage.id.in_(payload.page_ids)).all() if payload.page_ids else []
+
+    if len(pages) != len(payload.page_ids):
+        raise ApiError(400, "存在无效的页面 ID")
+
+    user.authorized_pages = pages
+    db.session.commit()
+    return jsonify(json_success(_serialize_user(user), "页面授权已更新"))

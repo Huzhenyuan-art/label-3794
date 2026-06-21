@@ -86,3 +86,9 @@
 | payload | JSON | NOT NULL | 业务数据 |
 | created_at | DATETIME | NOT NULL | 创建时间 |
 | updated_at | DATETIME | NOT NULL | 更新时间 |
+
+## 8) user_page_association（用户-页面授权关联表）
+| 字段名 | 类型 | 约束/索引 | 说明 |
+|---|---|---|---|
+| user_id | INT | PK, FK -> user.id | 用户 ID |
+| page_id | INT | PK, FK -> business_pages.id | 业务页面 ID |

@@ -28,6 +28,7 @@ import {
 } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { getUserAccessToken } from '../services/auth';
 import http, { extractErrorMessage } from '../services/http';
 import { formatDate } from '../utils/date';
 
@@ -54,6 +55,7 @@ function HomePage() {
   const [allTags, setAllTags] = useState([]);
   const [loading, setLoading] = useState(true);
   const [favorites, setFavorites] = useState([]);
+  const hasUserLogin = !!getUserAccessToken();
 
   const [search, setSearch] = useState('');
   const [activeGroupId, setActiveGroupId] = useState('all');
@@ -212,15 +214,25 @@ function HomePage() {
             <Text type="secondary" style={{ fontSize: 13 }}>统一发布业务功能页面与数据服务</Text>
           </div>
         </div>
-        <Button
-          type="primary"
-          size="large"
-          icon={<SettingOutlined />}
-          onClick={() => navigate('/admin/login')}
-          className="admin-btn"
-        >
-          管理后台
-        </Button>
+        <Space>
+          <Button
+            type="default"
+            size="large"
+            icon={<UserOutlined />}
+            onClick={() => navigate(hasUserLogin ? '/user' : '/user/login')}
+          >
+            {hasUserLogin ? '个人工作台' : '用户登录'}
+          </Button>
+          <Button
+            type="primary"
+            size="large"
+            icon={<SettingOutlined />}
+            onClick={() => navigate('/admin/login')}
+            className="admin-btn"
+          >
+            管理后台
+          </Button>
+        </Space>
       </Header>
 
       <Content className="portal-content">

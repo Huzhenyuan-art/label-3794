@@ -17,6 +17,7 @@ from .routes.admin_stats import bp as admin_stats_bp
 from .routes.auth import bp as auth_bp
 from .routes.data_api import bp as data_api_bp
 from .routes.public import bp as public_bp
+from .routes.user_portal import bp as user_portal_bp
 from .services.bootstrap_service import initialize_defaults
 from .services.cache_service import cache_service
 
@@ -52,6 +53,7 @@ def create_app() -> Flask:
     app.register_blueprint(admin_stats_bp)
     app.register_blueprint(public_bp)
     app.register_blueprint(data_api_bp)
+    app.register_blueprint(user_portal_bp)
 
     with app.app_context():
         try:
