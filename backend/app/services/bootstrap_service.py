@@ -1,5 +1,8 @@
 import logging
 import os
+import time
+
+from sqlalchemy import text
 
 from ..extensions import db
 from ..models import Admin, BusinessPage, DbConfig, SystemSetting, User
@@ -8,6 +11,29 @@ from .dynamic_table_service import create_record, ensure_dynamic_table
 
 
 logger = logging.getLogger(__name__)
+
+
+def _wait_for_db(app, max_retries: int = 30, retry_interval: int = 2) -> None:
+    """
+    等待数据库连接就绪，防止 Docker 环境下 MySQL 未完全启动导致启动失败。
+    """
+    with app.app_context():
+        for attempt in range(1, max_retries + 1):
+            try:
+                db.session.execute(text("SELECT 1"))
+                db.session.commit()
+                logger.info("数据库连接成功（第 %d 次尝试）", attempt)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "数据库连接失败（第 %d/%d 次尝试）：%s，%d 秒后重试...",
+                    attempt, max_retries, exc, retry_interval,
+                )
+                db.session.rollback()
+                if attempt == max_retries:
+                    logger.error("数据库连接重试次数已达上限，启动失败")
+                    raise
+                time.sleep(retry_interval)
 
 
 def _demo_page_html() -> str:
@@ -41,6 +67,7 @@ def _demo_page_html() -> str:
 
 
 def initialize_defaults(app) -> None:
+    _wait_for_db(app)
     with app.app_context():
         db.create_all()
 
