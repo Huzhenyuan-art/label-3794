@@ -4,8 +4,11 @@ import {
   RocketOutlined,
   SearchOutlined,
   SettingOutlined,
+  StarFilled,
+  StarOutlined,
   TagsOutlined,
   UserOutlined,
+  CloseOutlined,
 } from '@ant-design/icons';
 import {
   Button,
@@ -42,12 +45,15 @@ function colorForCategory(cat) {
   return CATEGORY_COLORS[Math.abs(hash) % CATEGORY_COLORS.length];
 }
 
+const FAVORITES_STORAGE_KEY = 'portal_page_favorites';
+
 function HomePage() {
   const navigate = useNavigate();
   const [pages, setPages] = useState([]);
   const [groups, setGroups] = useState([]);
   const [allTags, setAllTags] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [favorites, setFavorites] = useState([]);
 
   const [search, setSearch] = useState('');
   const [activeGroupId, setActiveGroupId] = useState('all');
@@ -99,6 +105,7 @@ function HomePage() {
   useEffect(() => {
     fetchGroups();
     fetchTags();
+    loadFavorites();
   }, []);
 
   useEffect(() => {
@@ -112,6 +119,58 @@ function HomePage() {
     });
     return items;
   }, [groups]);
+
+  const loadFavorites = () => {
+    try {
+      const stored = localStorage.getItem(FAVORITES_STORAGE_KEY);
+      if (stored) {
+        setFavorites(JSON.parse(stored));
+      }
+    } catch (error) {
+      console.error('加载收藏失败:', error);
+      setFavorites([]);
+    }
+  };
+
+  const saveFavorites = (newFavorites) => {
+    try {
+      localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(newFavorites));
+      setFavorites(newFavorites);
+    } catch (error) {
+      console.error('保存收藏失败:', error);
+    }
+  };
+
+  const isFavorite = (pageId) => {
+    return favorites.some((f) => f.id === pageId);
+  };
+
+  const toggleFavorite = (page, event) => {
+    event.stopPropagation();
+    if (isFavorite(page.id)) {
+      const newFavorites = favorites.filter((f) => f.id !== page.id);
+      saveFavorites(newFavorites);
+      message.success('已取消收藏');
+    } else {
+      const favoriteItem = {
+        id: page.id,
+        name: page.name,
+        route_path: page.route_path,
+        category: page.category,
+        addedAt: Date.now(),
+      };
+      const newFavorites = [...favorites, favoriteItem];
+      saveFavorites(newFavorites);
+      message.success('已添加到收藏');
+    }
+  };
+
+  const removeFavorite = (pageId, event) => {
+    event.stopPropagation();
+    const newFavorites = favorites.filter((f) => f.id !== pageId);
+    saveFavorites(newFavorites);
+    message.success('已从收藏移除');
+  };
 
   const recordPageVisit = async (pageId) => {
     try {
@@ -165,6 +224,42 @@ function HomePage() {
       </Header>
 
       <Content className="portal-content">
+        {favorites.length > 0 && (
+          <Card className="favorites-bar" bordered={false}>
+            <div className="favorites-bar-header">
+              <div className="favorites-bar-title">
+                <StarFilled className="favorites-bar-icon" />
+                <span>我的收藏</span>
+                <Tag color="gold" className="favorites-count">{favorites.length}</Tag>
+              </div>
+            </div>
+            <div className="favorites-list">
+              {favorites.map((fav) => (
+                <div
+                  key={fav.id}
+                  className="favorite-item"
+                  onClick={() => handlePageEnter(fav)}
+                >
+                  <div className="favorite-item-icon">
+                    <AppstoreOutlined />
+                  </div>
+                  <div className="favorite-item-info">
+                    <div className="favorite-item-name">{fav.name}</div>
+                    <div className="favorite-item-category">{fav.category}</div>
+                  </div>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<CloseOutlined />}
+                    className="favorite-item-remove"
+                    onClick={(e) => removeFavorite(fav.id, e)}
+                  />
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+
         <div className="portal-banner">
           <div className="portal-banner-content">
             <Title level={2} style={{ margin: 0, color: '#fff', fontWeight: 700 }}>
@@ -265,9 +360,18 @@ function HomePage() {
                     <div className="card-icon-wrapper">
                       <AppstoreOutlined className="card-icon" />
                     </div>
-                    <Tag color={colorForCategory(page.category)} className="card-category-tag">
-                      {page.category}
-                    </Tag>
+                    <div className="card-header-actions">
+                      <Tag color={colorForCategory(page.category)} className="card-category-tag">
+                        {page.category}
+                      </Tag>
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={isFavorite(page.id) ? <StarFilled className="favorite-icon-active" /> : <StarOutlined className="favorite-icon" />}
+                        onClick={(e) => toggleFavorite(page, e)}
+                        className="favorite-btn"
+                      />
+                    </div>
                   </div>
 
                   <Title level={4} className="card-title">
