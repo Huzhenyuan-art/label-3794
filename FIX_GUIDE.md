@@ -1670,3 +1670,348 @@ const fetchGroups = async () => {
    - 是否使用了安全序列化工具
    - 是否有默认数据兜底
    - 异常路径是否返回 200 + 友好消息，而非 500
+
+---
+
+## 十、业务页面管理页面首次进入报错 + 二维码显示空白
+
+### 问题现象
+
+1. **首次进入报错**：用户第一次进入"业务页面管理"页面时，前端提示"服务器内部错误"，刷新或再次进入后恢复正常
+2. **二维码显示空白**：页面列表中的"访问二维码"列显示空白占位图，点击刷新或查看大图也无法正常显示
+
+### 根因分析
+
+#### 根因 1：数据库表缺少 `qrcode_filename` 字段（核心根因）
+
+`Flask-SQLAlchemy` 的 `db.create_all()` **只会创建不存在的表，不会为已存在的表添加新列**。
+
+当数据库中已有 `business_pages` 表（历史数据），但表中没有 `qrcode_filename` 列时：
+- 第一次执行 `BusinessPage.query.all()` 会抛出 SQL 错误：
+  ```
+  OperationalError: (1054, "Unknown column 'business_pages.qrcode_filename' in 'field list'")
+  ```
+- 该错误被全局错误处理器捕获，返回 500 给前端
+- 第二次访问时，可能因为数据库连接重置或内部缓存，或者因为某些查询成功（不包含该字段的查询），所以恢复正常
+
+#### 根因 2：旧数据缺少二维码文件 + 序列化无即时补全
+
+- 历史数据的 `qrcode_filename` 字段为 `NULL`，序列化函数直接返回 `qrcode_url: null`
+- 前端收到 `null` 后显示空白占位图，但没有提供便捷的生成入口
+- 后端序列化函数虽然有 `_ensure_qrcode()` 尝试即时生成，但在以下场景会失败：
+  - `qrcode` 依赖包未安装 → `ModuleNotFoundError`
+  - 二维码目录不存在 → `FileNotFoundError`
+  - `request` 上下文在某些调用时机不存在 → `RuntimeError`
+
+#### 根因 3：缺少自动化数据库列迁移
+
+在 [bootstrap_service.py](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/app/services/bootstrap_service.py) 中缺少对现有表结构的检查和迁移逻辑，新增字段只能依赖开发者手动执行 ALTER TABLE 语句。
+
+#### 根因 4：`_backfill_qrcodes()` 中错误导入 `request`
+
+```python
+def _backfill_qrcodes(app) -> None:
+    from flask import request  # ❌ 错误：在无请求上下文的地方导入 request
+```
+
+虽然这行代码没有实际使用 `request`，但在某些 Python 版本或导入机制下，`from flask import request` 会立即尝试访问请求上下文，导致导入失败。
+
+#### 根因 5：前端容错处理不足
+
+- `Image` 组件缺少 `fallback` 属性，图片加载失败时显示浏览器默认的"裂图"图标
+- 二维码为空时只显示"暂无"文字，没有提供一键生成按钮
+- 弹窗在二维码生成过程中没有加载动画，用户体验不佳
+
+---
+
+### 修复方案
+
+#### 一、数据库层：自动列迁移
+
+**文件**：[bootstrap_service.py](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/app/services/bootstrap_service.py)
+
+新增 `_migrate_database_columns()` 函数，在 `db.create_all()` 之后执行：
+
+```python
+def _migrate_database_columns(app) -> None:
+    with app.app_context():
+        try:
+            # 先尝试查询，如果字段已存在会成功
+            db.session.execute(text("SELECT qrcode_filename FROM business_pages LIMIT 1"))
+            db.session.commit()
+            logger.info("数据库列 qrcode_filename 已存在，跳过迁移")
+        except Exception:
+            db.session.rollback()
+            try:
+                # 字段不存在，执行 ALTER TABLE 添加
+                db.session.execute(
+                    text("ALTER TABLE business_pages ADD COLUMN qrcode_filename VARCHAR(255) NULL")
+                )
+                db.session.commit()
+                logger.info("数据库迁移成功：已添加 qrcode_filename 列")
+            except Exception as exc:
+                db.session.rollback()
+                logger.warning("添加 qrcode_filename 列失败（可能已存在）：%s", exc)
+```
+
+调用时机：
+```python
+def initialize_defaults(app) -> None:
+    _wait_for_db(app)
+    with app.app_context():
+        db.create_all()
+        _migrate_database_columns(app)  # ✅ 新增：自动迁移数据库列
+        # ... 后续逻辑
+```
+
+#### 二、数据补全层：批量生成缺失的二维码
+
+**文件**：[bootstrap_service.py](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/app/services/bootstrap_service.py)
+
+新增 `_backfill_qrcodes()` 函数，为所有缺少二维码的旧数据补全：
+
+```python
+def _backfill_qrcodes(app) -> None:
+    with app.app_context():
+        try:
+            # 查询所有缺少二维码的页面
+            pages_without_qrcode = BusinessPage.query.filter(
+                (BusinessPage.qrcode_filename.is_(None)) | (BusinessPage.qrcode_filename == "")
+            ).all()
+
+            if not pages_without_qrcode:
+                logger.info("所有页面已有二维码，跳过补全")
+                return
+
+            os.makedirs(qrcode_dir, exist_ok=True)
+
+            success_count = 0
+            for page in pages_without_qrcode:
+                try:
+                    base_url = os.environ.get("APP_BASE_URL", "http://localhost:5173")
+                    share_url = urljoin(base_url.rstrip("/") + "/", page.route_path.lstrip("/"))
+                    qrcode_fn = f"page_{page.id}_{int(time.time())}"
+                    generate_qrcode_image(share_url, qrcode_fn)
+                    page.qrcode_filename = qrcode_fn
+                    success_count += 1
+                except Exception as qr_err:
+                    logger.warning("为页面 %s 生成二维码失败：%s", page.name, qr_err)
+                    continue
+
+            if success_count > 0:
+                db.session.commit()
+                logger.info("二维码补全完成：成功 %d 个页面", success_count)
+        except Exception as exc:
+            db.session.rollback()
+            logger.warning("二维码补全过程出错：%s", exc)
+```
+
+同时为新建的示例页面也生成二维码：
+```python
+if not demo_page:
+    # ... 创建 demo_page ...
+    db.session.commit()
+    
+    # ✅ 新增：为示例页面生成二维码
+    try:
+        base_url = os.environ.get("APP_BASE_URL", "http://localhost:5173")
+        share_url = urljoin(base_url.rstrip("/") + "/", demo_page.route_path.lstrip("/"))
+        qrcode_fn = f"page_{demo_page.id}_{int(time.time())}"
+        generate_qrcode_image(share_url, qrcode_fn)
+        demo_page.qrcode_filename = qrcode_fn
+        db.session.commit()
+    except Exception as qr_err:
+        db.session.rollback()
+        logger.warning("为示例页面生成二维码失败：%s", qr_err)
+```
+
+#### 三、序列化层：即时补全 + 容错增强
+
+**文件**：[admin_pages.py](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/app/routes/admin_pages.py)
+
+1. **增强 `_build_share_url()` 的容错**：
+   ```python
+   def _build_share_url(page: BusinessPage) -> str:
+       try:
+           base_url = request.host_url.rstrip("/")
+       except Exception:
+           # 无请求上下文时使用环境变量或默认值
+           base_url = os.environ.get("APP_BASE_URL", "http://localhost:5173").rstrip("/")
+       route_path = safe_getattr(page, "route_path", "")
+       return urljoin(base_url + "/", route_path.lstrip("/"))
+   ```
+
+2. **新增 `_ensure_qrcode()` 即时补全函数**：
+   ```python
+   def _ensure_qrcode(page: BusinessPage) -> str | None:
+       if not page or not page.id:
+           return None
+
+       qrcode_filename = safe_getattr(page, "qrcode_filename")
+       if qrcode_filename:
+           # 验证文件是否实际存在
+           qrcode_dir = os.path.join(os.path.dirname(current_app.config["UPLOAD_ROOT"]), "qrcodes")
+           filename = qrcode_filename if qrcode_filename.endswith(".png") else f"{qrcode_filename}.png"
+           file_path = os.path.join(qrcode_dir, filename)
+           if os.path.exists(file_path):
+               return qrcode_filename
+
+       # 二维码不存在，即时生成
+       try:
+           share_url = _build_share_url(page)
+           qrcode_fn = f"page_{page.id}_{int(time.time())}"
+           generate_qrcode_image(share_url, qrcode_fn)
+           page.qrcode_filename = qrcode_fn
+           db.session.commit()
+           logger.info("为页面 %s 即时生成二维码成功", page.name)
+           return qrcode_fn
+       except Exception as qr_err:
+           logger.warning("为页面 %s 即时生成二维码失败：%s", safe_getattr(page, "name", "未知"), qr_err)
+           db.session.rollback()
+           return None
+   ```
+
+3. **增强 `_serialize_page()` 的容错**：
+   - 外层添加完整 try-catch，任何字段序列化失败都返回降级数据
+   - 调用 `_ensure_qrcode()` 即时补全二维码
+   - 返回的数据永远包含完整字段结构，避免前端访问 undefined
+
+#### 四、前端层：完善容错与用户体验
+
+**文件**：[BusinessPagesPanel.jsx](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/frontend/src/pages/admin/BusinessPagesPanel.jsx)
+
+1. **列表二维码列增强**：
+   - `Image` 组件添加 `fallback` 属性，图片加载失败时显示"加载失败"占位
+   - 二维码为空时显示"点我生成"按钮，点击立即调用 `refreshQrcode()`
+   - 三个操作按钮（下载/复制/查看）在二维码为空时也能正常工作
+
+2. **`openQrcode()` 自动生成二维码**：
+   ```javascript
+   const openQrcode = async (page) => {
+     setQrcodePage(page);
+     setQrcodeOpen(true);
+     if (!page.qrcode_url) {
+       try {
+         // 自动调用刷新接口生成二维码
+         const { data } = await http.post(`/api/admin/pages/${page.id}/qrcode/refresh`);
+         setPages((prev) => prev.map((p) => (p.id === page.id ? data.data : p)));
+         setQrcodePage(data.data);
+       } catch (error) {
+         message.error(extractErrorMessage(error));
+       }
+     }
+   };
+   ```
+
+3. **弹窗内容增强**：
+   - 二维码加载失败时显示橙色警告框，提示"图片加载失败，点击下方按钮刷新"
+   - 二维码生成中显示蓝色加载动画 + "二维码生成中，请稍候..."
+   - 分享链接输入框添加 `|| ''` 兜底，避免显示 `undefined`
+
+#### 五、依赖与配置层
+
+**文件**：[requirements.txt](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/requirements.txt)
+
+确保 `qrcode` 依赖已添加：
+```
+qrcode==7.4.2
+```
+
+**环境变量建议**：
+在 `.env` 或 `docker-compose.yml` 中添加：
+```
+APP_BASE_URL=http://your-domain.com
+```
+用于在无请求上下文时构建正确的分享链接。
+
+---
+
+### 修复效果验证
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| 首次进入页面，数据库缺少字段 | 返回 500 "服务器内部错误" | 自动执行 ALTER TABLE，返回 200 + 正常数据 |
+| 旧数据没有二维码 | 列表显示空白占位图 | 自动补全二维码，列表正常显示 |
+| `qrcode` 包未安装 | 二维码生成失败，无提示 | 日志记录警告，前端显示"点我生成"按钮 |
+| 点击查看大图但二维码不存在 | 弹窗显示空白 | 自动调用刷新接口生成，显示加载动画 |
+| 二维码图片文件损坏 | 显示浏览器裂图 | 显示"加载失败"占位，点击刷新可恢复 |
+| 示例页面 | 无二维码 | 创建时自动生成二维码 |
+
+---
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `backend/requirements.txt` | 新增 `qrcode==7.4.2` 依赖 |
+| `backend/app/models.py` | 为 `BusinessPage` 模型新增 `qrcode_filename` 字段 |
+| `backend/app/services/qrcode_service.py` | （新增文件）二维码生成、删除、URL 管理服务 |
+| `backend/app/services/bootstrap_service.py` | 新增 `_migrate_database_columns()` 自动列迁移；新增 `_backfill_qrcodes()` 批量补全二维码；修复错误的 `request` 导入；为示例页面生成二维码 |
+| `backend/app/routes/admin_pages.py` | 新增 `_build_share_url()` 容错版 URL 构建；新增 `_ensure_qrcode()` 即时补全；增强 `_serialize_page()` 全面容错；新增二维码下载、刷新、获取分享链接 API |
+| `backend/app/__init__.py` | 新增 `/static/qrcodes/<path:filename>` 静态文件路由 |
+| `frontend/src/pages/admin/BusinessPagesPanel.jsx` | 新增"访问二维码"列表列，含缩略图和快捷操作；新增二维码大图预览弹窗；增强 `Image` 组件 fallback；空二维码自动生成按钮；`openQrcode()` 自动生成逻辑 |
+
+---
+
+### 验证方法
+
+#### 验证 1：数据库字段自动迁移
+
+1. 删除数据库中 `business_pages` 表的 `qrcode_filename` 列（或使用全新数据库）：
+   ```sql
+   ALTER TABLE business_pages DROP COLUMN qrcode_filename;
+   ```
+2. 重启后端应用，观察启动日志：
+   - 应看到 `"数据库迁移成功：已添加 qrcode_filename 列"`
+3. 验证字段已添加：
+   ```sql
+   DESCRIBE business_pages;
+   ```
+   应能看到 `qrcode_filename` 字段
+
+#### 验证 2：旧数据二维码补全
+
+1. 准备一些 `qrcode_filename` 为 NULL 的旧数据（或手动 UPDATE）
+2. 重启后端应用，观察启动日志：
+   - 应看到 `"二维码补全完成：成功 N 个页面"`
+3. 检查 `backend/qrcodes/` 目录：
+   - 应为每个页面生成对应的 PNG 文件
+4. 访问页面列表 API：
+   - 所有页面的 `qrcode_url` 字段应有值
+
+#### 验证 3：前端显示与交互
+
+1. 进入"业务页面管理"页面：
+   - 不应有任何错误提示
+   - "访问二维码"列应显示二维码缩略图
+   - 三个快捷按钮（下载/复制/查看）均可正常工作
+2. 点击缩略图：
+   - 弹窗正常打开
+   - 如果二维码不存在，自动生成并显示加载动画
+   - 分享链接输入框显示完整 URL
+   - 底部三个按钮（刷新/复制/下载）均可正常工作
+3. 点击"点我生成"按钮（针对无二维码的行）：
+   - 应成功生成二维码并刷新列表显示
+
+#### 验证 4：无新问题引入
+
+1. 测试页面的创建/编辑/删除功能：
+   - 创建页面 → 自动生成二维码 ✅
+   - 编辑页面 → 自动刷新二维码 ✅
+   - 删除页面 → 同步删除二维码文件 ✅
+2. 测试门户首页展示：
+   - 二维码相关字段不影响门户页面展示 ✅
+3. 检查日志：
+   - 无异常 ERROR 日志 ✅
+   - 所有二维码操作均有 INFO 级日志 ✅
+
+---
+
+### 预防措施
+
+1. **新增数据库字段必须配套迁移逻辑**：禁止只修改模型而不考虑已有数据，必须在 `bootstrap_service.py` 中添加对应的 `ALTER TABLE` 迁移逻辑
+2. **新增依赖必须在 requirements.txt 中声明**：所有新增的 Python 包必须在 `requirements.txt` 中显式指定版本
+3. **序列化函数必须全面容错**：返回数据库对象的 API，序列化函数外层必须有 try-catch，返回降级数据而非抛出异常
+4. **图片/文件类资源必须验证存在性**：不能只依赖数据库字段判断文件是否存在，必须实际检查文件系统
+5. **前端 Image 组件必须添加 fallback**：所有展示网络图片的 `Image` 组件，必须配置 `fallback` 属性，避免显示裂图
+6. **环境变量兜底**：所有依赖外部配置的功能（如域名、端口），必须提供合理的默认值，避免配置缺失导致崩溃

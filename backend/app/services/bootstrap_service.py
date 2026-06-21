@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from urllib.parse import urljoin
 
 from sqlalchemy import text
 
@@ -8,6 +9,7 @@ from ..extensions import db
 from ..models import Admin, BusinessPage, DbConfig, PageGroup, PageTag, SystemSetting, User
 from ..security import encrypt_text, generate_api_token, hash_password, hash_token
 from .dynamic_table_service import create_record, ensure_dynamic_table
+from .qrcode_service import generate_qrcode_image, get_qrcode_url
 
 
 logger = logging.getLogger(__name__)
@@ -66,12 +68,69 @@ def _demo_page_html() -> str:
 """
 
 
+def _migrate_database_columns(app) -> None:
+    with app.app_context():
+        try:
+            db.session.execute(text("SELECT qrcode_filename FROM business_pages LIMIT 1"))
+            db.session.commit()
+            logger.info("数据库列 qrcode_filename 已存在，跳过迁移")
+        except Exception:
+            db.session.rollback()
+            try:
+                db.session.execute(
+                    text("ALTER TABLE business_pages ADD COLUMN qrcode_filename VARCHAR(255) NULL")
+                )
+                db.session.commit()
+                logger.info("数据库迁移成功：已添加 qrcode_filename 列")
+            except Exception as exc:
+                db.session.rollback()
+                logger.warning("添加 qrcode_filename 列失败（可能已存在）：%s", exc)
+
+
+def _backfill_qrcodes(app) -> None:
+    with app.app_context():
+        try:
+            pages_without_qrcode = BusinessPage.query.filter(
+                (BusinessPage.qrcode_filename.is_(None)) | (BusinessPage.qrcode_filename == "")
+            ).all()
+
+            if not pages_without_qrcode:
+                logger.info("所有页面已有二维码，跳过补全")
+                return
+
+            qrcode_dir = os.path.join(os.path.dirname(app.config["UPLOAD_ROOT"]), "qrcodes")
+            os.makedirs(qrcode_dir, exist_ok=True)
+
+            success_count = 0
+            for page in pages_without_qrcode:
+                try:
+                    base_url = os.environ.get("APP_BASE_URL", "http://localhost:5173")
+                    share_url = urljoin(base_url.rstrip("/") + "/", page.route_path.lstrip("/"))
+                    qrcode_fn = f"page_{page.id}_{int(time.time())}"
+                    generate_qrcode_image(share_url, qrcode_fn)
+                    page.qrcode_filename = qrcode_fn
+                    success_count += 1
+                except Exception as qr_err:
+                    logger.warning("为页面 %s 生成二维码失败：%s", page.name, qr_err)
+                    continue
+
+            if success_count > 0:
+                db.session.commit()
+                logger.info("二维码补全完成：成功 %d 个页面", success_count)
+        except Exception as exc:
+            db.session.rollback()
+            logger.warning("二维码补全过程出错：%s", exc)
+
+
 def initialize_defaults(app) -> None:
     _wait_for_db(app)
     with app.app_context():
         db.create_all()
 
+        _migrate_database_columns(app)
+
         os.makedirs(app.config["UPLOAD_ROOT"], exist_ok=True)
+        os.makedirs(os.path.join(os.path.dirname(app.config["UPLOAD_ROOT"]), "qrcodes"), exist_ok=True)
 
         setting = SystemSetting.query.first()
         if not setting:
@@ -186,6 +245,17 @@ def initialize_defaults(app) -> None:
             db.session.add(demo_page)
             db.session.commit()
 
+            try:
+                base_url = os.environ.get("APP_BASE_URL", "http://localhost:5173")
+                share_url = urljoin(base_url.rstrip("/") + "/", demo_page.route_path.lstrip("/"))
+                qrcode_fn = f"page_{demo_page.id}_{int(time.time())}"
+                generate_qrcode_image(share_url, qrcode_fn)
+                demo_page.qrcode_filename = qrcode_fn
+                db.session.commit()
+            except Exception as qr_err:
+                db.session.rollback()
+                logger.warning("为示例页面生成二维码失败：%s", qr_err)
+
         if default_group and demo_page not in default_group.pages:
             default_group.pages.append(demo_page)
             db.session.commit()
@@ -206,5 +276,7 @@ def initialize_defaults(app) -> None:
             )
         except Exception:
             db.session.rollback()
+
+        _backfill_qrcodes(app)
 
         logger.info("系统初始化完成")

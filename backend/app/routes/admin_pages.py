@@ -40,8 +40,38 @@ logger = logging.getLogger(__name__)
 
 
 def _build_share_url(page: BusinessPage) -> str:
-    base_url = request.host_url.rstrip("/")
-    return urljoin(base_url, page.route_path)
+    try:
+        base_url = request.host_url.rstrip("/")
+    except Exception:
+        base_url = os.environ.get("APP_BASE_URL", "http://localhost:5173").rstrip("/")
+    route_path = safe_getattr(page, "route_path", "")
+    return urljoin(base_url + "/", route_path.lstrip("/"))
+
+
+def _ensure_qrcode(page: BusinessPage) -> str | None:
+    if not page or not page.id:
+        return None
+
+    qrcode_filename = safe_getattr(page, "qrcode_filename")
+    if qrcode_filename:
+        qrcode_dir = os.path.join(os.path.dirname(current_app.config["UPLOAD_ROOT"]), "qrcodes")
+        filename = qrcode_filename if qrcode_filename.endswith(".png") else f"{qrcode_filename}.png"
+        file_path = os.path.join(qrcode_dir, filename)
+        if os.path.exists(file_path):
+            return qrcode_filename
+
+    try:
+        share_url = _build_share_url(page)
+        qrcode_fn = f"page_{page.id}_{int(time.time())}"
+        generate_qrcode_image(share_url, qrcode_fn)
+        page.qrcode_filename = qrcode_fn
+        db.session.commit()
+        logger.info("为页面 %s 即时生成二维码成功", page.name)
+        return qrcode_fn
+    except Exception as qr_err:
+        logger.warning("为页面 %s 即时生成二维码失败：%s", safe_getattr(page, "name", "未知"), qr_err)
+        db.session.rollback()
+        return None
 
 
 def _serialize_page(page: BusinessPage) -> dict:
@@ -53,31 +83,60 @@ def _serialize_page(page: BusinessPage) -> dict:
         groups = []
         tags = []
 
-    qrcode_filename = safe_getattr(page, "qrcode_filename")
+    try:
+        qrcode_filename = _ensure_qrcode(page)
+    except Exception:
+        qrcode_filename = safe_getattr(page, "qrcode_filename")
+
     qrcode_url = get_qrcode_url(qrcode_filename) if qrcode_filename else None
     share_url = _build_share_url(page) if safe_getattr(page, "route_path") else None
 
-    return {
-        "id": safe_getattr(page, "id"),
-        "name": safe_getattr(page, "name", ""),
-        "description": safe_getattr(page, "description", ""),
-        "category": safe_getattr(page, "category", ""),
-        "developer": safe_getattr(page, "developer", ""),
-        "main_page": safe_getattr(page, "main_page", ""),
-        "storage_folder": safe_getattr(page, "storage_folder", ""),
-        "route_path": safe_getattr(page, "route_path", ""),
-        "table_prefix": safe_getattr(page, "table_prefix", ""),
-        "table_name": safe_getattr(page, "table_name", ""),
-        "status": safe_getattr(page, "status", ""),
-        "uploader_admin_id": safe_getattr(page, "uploader_admin_id"),
-        "created_at": to_iso(safe_getattr(page, "created_at")),
-        "updated_at": to_iso(safe_getattr(page, "updated_at")),
-        "groups": groups,
-        "tags": tags,
-        "qrcode_url": qrcode_url,
-        "qrcode_filename": qrcode_filename,
-        "share_url": share_url,
-    }
+    try:
+        page_id = safe_getattr(page, "id")
+        return {
+            "id": page_id,
+            "name": safe_getattr(page, "name", ""),
+            "description": safe_getattr(page, "description", ""),
+            "category": safe_getattr(page, "category", ""),
+            "developer": safe_getattr(page, "developer", ""),
+            "main_page": safe_getattr(page, "main_page", ""),
+            "storage_folder": safe_getattr(page, "storage_folder", ""),
+            "route_path": safe_getattr(page, "route_path", ""),
+            "table_prefix": safe_getattr(page, "table_prefix", ""),
+            "table_name": safe_getattr(page, "table_name", ""),
+            "status": safe_getattr(page, "status", ""),
+            "uploader_admin_id": safe_getattr(page, "uploader_admin_id"),
+            "created_at": to_iso(safe_getattr(page, "created_at")),
+            "updated_at": to_iso(safe_getattr(page, "updated_at")),
+            "groups": groups,
+            "tags": tags,
+            "qrcode_url": qrcode_url,
+            "qrcode_filename": qrcode_filename,
+            "share_url": share_url,
+        }
+    except Exception as exc:
+        logger.error("序列化页面失败：%s", exc)
+        return {
+            "id": safe_getattr(page, "id"),
+            "name": safe_getattr(page, "name", ""),
+            "description": safe_getattr(page, "description", ""),
+            "category": safe_getattr(page, "category", ""),
+            "developer": safe_getattr(page, "developer", ""),
+            "main_page": safe_getattr(page, "main_page", ""),
+            "storage_folder": safe_getattr(page, "storage_folder", ""),
+            "route_path": safe_getattr(page, "route_path", ""),
+            "table_prefix": safe_getattr(page, "table_prefix", ""),
+            "table_name": safe_getattr(page, "table_name", ""),
+            "status": safe_getattr(page, "status", ""),
+            "uploader_admin_id": safe_getattr(page, "uploader_admin_id"),
+            "created_at": to_iso(safe_getattr(page, "created_at")),
+            "updated_at": to_iso(safe_getattr(page, "updated_at")),
+            "groups": [],
+            "tags": [],
+            "qrcode_url": None,
+            "qrcode_filename": None,
+            "share_url": None,
+        }
 
 
 def _generate_table_prefix(page_id: int | None = None) -> str:

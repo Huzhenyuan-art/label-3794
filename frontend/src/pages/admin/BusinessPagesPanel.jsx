@@ -213,9 +213,18 @@ function BusinessPagesPanel() {
     }
   };
 
-  const openQrcode = (page) => {
+  const openQrcode = async (page) => {
     setQrcodePage(page);
     setQrcodeOpen(true);
+    if (!page.qrcode_url) {
+      try {
+        const { data } = await http.post(`/api/admin/pages/${page.id}/qrcode/refresh`);
+        setPages((prev) => prev.map((p) => (p.id === page.id ? data.data : p)));
+        setQrcodePage(data.data);
+      } catch (error) {
+        message.error(extractErrorMessage(error));
+      }
+    }
   };
 
   const copyShareUrl = async (page) => {
@@ -330,6 +339,23 @@ function BusinessPagesPanel() {
               style={{ cursor: 'pointer', border: '1px solid #f0f0f0', borderRadius: 4 }}
               preview={false}
               onClick={() => openQrcode(record)}
+              fallback={
+                <div
+                  style={{
+                    width: 80,
+                    height: 80,
+                    border: '1px dashed #d9d9d9',
+                    borderRadius: 4,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#bfbfbf',
+                    fontSize: 12,
+                  }}
+                >
+                  加载失败
+                </div>
+              }
             />
           ) : (
             <div
@@ -339,13 +365,18 @@ function BusinessPagesPanel() {
                 border: '1px dashed #d9d9d9',
                 borderRadius: 4,
                 display: 'flex',
+                flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
-                color: '#bfbfbf',
+                color: '#8c9ab5',
                 fontSize: 12,
+                cursor: 'pointer',
               }}
+              onClick={() => refreshQrcode(record)}
+              title="点击生成二维码"
             >
-              暂无
+              <ReloadOutlined style={{ fontSize: 16, marginBottom: 2 }} />
+              点我生成
             </div>
           )}
           <Space size={4}>
@@ -367,7 +398,7 @@ function BusinessPagesPanel() {
                 style={{ padding: 0 }}
               />
             </Tooltip>
-            <Tooltip title="查看大图">
+            <Tooltip title={value ? '查看大图' : '生成并查看'}>
               <Button
                 type="link"
                 size="small"
@@ -611,28 +642,51 @@ function BusinessPagesPanel() {
                 height={260}
                 style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: 8 }}
                 preview={false}
+                fallback={
+                  <div
+                    style={{
+                      width: 260,
+                      height: 260,
+                      border: '1px dashed #faad14',
+                      borderRadius: 8,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#faad14',
+                      margin: '0 auto',
+                      gap: 8,
+                    }}
+                  >
+                    <ReloadOutlined style={{ fontSize: 32 }} />
+                    <div style={{ fontSize: 13 }}>图片加载失败，点击下方按钮刷新</div>
+                  </div>
+                }
               />
             ) : (
               <div
                 style={{
                   width: 260,
                   height: 260,
-                  border: '1px dashed #d9d9d9',
+                  border: '1px dashed #1890ff',
                   borderRadius: 8,
                   display: 'flex',
+                  flexDirection: 'column',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: '#bfbfbf',
+                  color: '#1890ff',
                   margin: '0 auto',
+                  gap: 8,
                 }}
               >
-                二维码生成中...
+                <ReloadOutlined spin style={{ fontSize: 32 }} />
+                <div style={{ fontSize: 13 }}>二维码生成中，请稍候...</div>
               </div>
             )}
             <div style={{ marginTop: 20 }}>
               <div style={{ color: '#666', fontSize: 13, marginBottom: 6 }}>分享链接：</div>
               <Input
-                value={qrcodePage.share_url || qrcodePage.route_path}
+                value={qrcodePage.share_url || qrcodePage.route_path || ''}
                 readOnly
                 style={{ fontFamily: 'monospace', fontSize: 12 }}
                 suffix={
