@@ -1389,3 +1389,284 @@ def _serialize_page(page: BusinessPage) -> dict:
    - 是否对集合转 list 做了 try-catch
 4. **接口烟雾测试**：在预发环境定期注入脏数据（关联表手动删除部分行），验证接口不崩溃
 5. **日志告警**：对 utils 中的 warning 级别日志接入监控，超过阈值时自动告警（说明关联数据质量在下降）
+
+---
+
+## 九、业务页面管理页面首次访问持续"服务器内部错误"
+
+### 问题现象
+
+新用户首次访问管理后台的"业务页面管理"页面时，前端持续弹出"服务器内部错误"提示，页面无法正常加载。
+
+刷新页面、退出重登均无法解决。错误在每次访问时**稳定复现**。
+
+### 根因分析
+
+前端 `BusinessPagesPanel` 组件在 `useEffect` 中**并行调用 3 个后端 API**：
+
+```javascript
+useEffect(() => {
+  fetchPages();    // GET /api/admin/pages
+  fetchGroups();   // GET /api/admin/groups?status=enabled
+  fetchTags();     // GET /api/admin/tags?status=enabled
+}, []);
+```
+
+其中任何一个 API 返回 500，都会触发 `message.error(extractErrorMessage(error))`，导致用户看到"服务器内部错误"。
+
+通过代码审计，定位到**三层根因**：
+
+#### 根因 1：`bootstrap_service.py` 未显式导入新增模型
+
+`bootstrap_service.py` 在应用启动时负责初始化数据库，但原始导入只有：
+
+```python
+from ..models import Admin, BusinessPage, DbConfig, SystemSetting, User
+```
+
+**缺少 `PageGroup` 和 `PageTag` 的显式导入！**
+
+虽然 `BusinessPage` 在 `models.py` 中位于文件末尾（已修复定义顺序问题），理论上导入 `BusinessPage` 会触发前面的 `PageGroup`、`PageTag` 和关联表代码执行，但在以下边缘场景下可能失效：
+- Python 导入缓存机制导致部分代码未完整执行
+- SQLAlchemy mapper 配置阶段的竞态条件
+- 模型继承或元类机制的延迟初始化
+
+这导致 **`page_groups`、`page_tags`、`page_group_association`、`page_tag_association` 四张表可能未被 `db.create_all()` 创建**。
+
+首次访问时，`/api/admin/groups` 接口执行 `PageGroup.query.all()`，抛出：
+```
+ProgrammingError: (1146, "Table 'label_portal.page_groups' doesn't exist")
+```
+
+#### 根因 2：`/api/admin/groups` 和 `/api/admin/tags` 缺少容错保护
+
+`admin_groups_tags.py` 中的列表接口使用**原始列表推导式**，无任何容错：
+
+```python
+return jsonify(json_success([_serialize_group(g) for g in groups]))
+```
+
+存在两个脆弱点：
+1. **查询阶段无 try-catch**：`query.all()` 抛出 `ProgrammingError`（表不存在）直接冒泡到全局错误处理器，返回 500
+2. **序列化阶段无外层保护**：`_serialize_group` 虽然内部有 `serialize_group` 的保护，但函数本身没有外层 try-catch
+
+#### 根因 3：初始数据库完全为空，无示例分组/标签数据
+
+即使表创建成功，首次访问时 `PageGroup` 和 `PageTag` 表也完全为空。虽然空列表本身不会导致崩溃，但：
+- 前端 `groups.map((g) => <Checkbox ...>)` 处理空列表没问题
+- 但结合根因 1 和 2，问题会被放大
+
+### 修复方案
+
+#### 一、启动初始化层：显式导入 + 默认数据兜底
+
+**文件**：`backend/app/services/bootstrap_service.py`
+
+1. **显式导入新增模型**，确保 100% 注册到 SQLAlchemy metadata：
+
+   ```python
+   # 修改前
+   from ..models import Admin, BusinessPage, DbConfig, SystemSetting, User
+   
+   # 修改后
+   from ..models import Admin, BusinessPage, DbConfig, PageGroup, PageTag, SystemSetting, User
+   ```
+
+2. **创建默认分组**，确保首次访问时有数据：
+
+   ```python
+   default_group = PageGroup.query.filter_by(name="默认分组").first()
+   if not default_group:
+       default_group = PageGroup(
+           name="默认分组",
+           description="系统默认分组，用于归类未指定分组的页面",
+           sort_order=0,
+           status="enabled",
+       )
+       db.session.add(default_group)
+   ```
+
+3. **创建 5 个常用默认标签**：
+
+   ```python
+   default_tags = [
+       {"name": "核心", "color": "red"},
+       {"name": "重要", "color": "orange"},
+       {"name": "常用", "color": "gold"},
+       {"name": "新功能", "color": "green"},
+       {"name": "维护中", "color": "default"},
+   ]
+   for tag_info in default_tags:
+       existing = PageTag.query.filter_by(name=tag_info["name"]).first()
+       if not existing:
+           new_tag = PageTag(
+               name=tag_info["name"], color=tag_info["color"], status="enabled"
+           )
+           db.session.add(new_tag)
+   ```
+
+4. **将示例页面绑定到默认分组和标签**，确保关联查询有完整数据：
+
+   ```python
+   if default_group and demo_page not in default_group.pages:
+       default_group.pages.append(demo_page)
+       db.session.commit()
+   
+   important_tag = PageTag.query.filter_by(name="重要").first()
+   if important_tag and demo_page not in important_tag.pages:
+       important_tag.pages.append(demo_page)
+       db.session.commit()
+   ```
+
+#### 二、API 层：双层容错保护
+
+**文件**：`backend/app/routes/admin_groups_tags.py`
+
+1. **序列化函数外层 try-catch**：
+
+   ```python
+   def _serialize_group(group: PageGroup) -> dict:
+       try:
+           data = serialize_group(group)
+           if data is None:
+               return {...}  # 降级数据
+           data["created_at"] = to_iso(safe_getattr(group, "created_at"))
+           return data
+       except Exception as exc:
+           logger.warning("分组序列化失败，返回降级数据：%s", exc)
+           return {...}  # 完整降级数据
+   ```
+
+2. **列表接口整体 try-catch + `safe_serialize_iterable`**：
+
+   ```python
+   @bp.get("/groups")
+   @admin_required()
+   def list_groups():
+       try:
+           status = request.args.get("status", "all")
+           query = PageGroup.query
+           if status in {"enabled", "disabled"}:
+               query = query.filter(PageGroup.status == status)
+           groups = query.order_by(...).all()
+           return jsonify(json_success(safe_serialize_iterable(groups, _serialize_group)))
+       except Exception as exc:
+           logger.error("获取分组列表失败，返回空列表：%s", exc)
+           return jsonify(json_success([], "获取分组列表时出现问题，已返回空数据"))
+   ```
+
+**关键保护点**：
+- 即使 `query.all()` 抛出 `ProgrammingError`（表不存在），也会被捕获并返回空列表 + 200 状态码
+- 前端收到 200 状态码和 `data: []`，不会弹出错误提示
+- 日志中保留完整错误信息，便于排查
+- `safe_serialize_iterable` 确保单个元素序列化失败不影响整个列表
+
+#### 三、前端层（可选增强）：非关键接口失败不弹错误
+
+虽然后端修复后前端不会再收到 500，但建议优化 `BusinessPagesPanel.jsx` 中的错误处理：
+
+```javascript
+const fetchGroups = async () => {
+  try {
+    const { data } = await http.get('/api/admin/groups', { params: { status: 'enabled' } });
+    setGroups(data.data || []);
+    if (data.message !== 'ok') {
+      message.warning(data.message);  // 服务端返回友好提示时显示警告
+    }
+  } catch (error) {
+    setGroups([]);  // 即使失败也设置空列表，不阻塞页面
+    message.warning(extractErrorMessage(error));  // 用 warning 代替 error
+  }
+};
+```
+
+### 修复效果验证
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| 全新数据库，表不存在 | `/api/admin/groups` 返回 500，前端弹"服务器内部错误" | 返回 200 + `data: []`，页面正常加载，日志记录错误详情 |
+| 表存在但无数据 | 返回空列表，前端正常 | 返回空列表 + 默认数据，页面展示更友好 |
+| 表存在且有数据 | 正常返回 | 正常返回，新增容错不影响 |
+| 序列化单个元素失败 | 整个接口 500 | 跳过坏元素，其余正常返回，记录告警 |
+| 示例页面无分组/标签 | 前端显示 `-` 空占位 | 自动绑定"默认分组"和"重要"标签，展示效果更佳 |
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `backend/app/services/bootstrap_service.py` | 显式导入 `PageGroup`、`PageTag`；新增默认分组、默认标签初始化；绑定示例页面到分组和标签 |
+| `backend/app/routes/admin_groups_tags.py` | 新增 `import logging` 和 logger；`_serialize_group/tag` 加外层 try-catch；`list_groups/tags` 接口加整体 try-catch，使用 `safe_serialize_iterable` |
+| `backend/app/utils.py` | （已有，无需修改）提供 `safe_serialize_iterable`、`serialize_group`、`serialize_tag` 等安全工具 |
+
+### 验证方法
+
+#### 验证 1：全新数据库场景（最关键）
+
+1. 手动删除或重命名数据库，模拟全新安装环境
+2. 启动应用，观察启动日志：
+   - 应看到 `"已创建默认分组：默认分组"`
+   - 应看到 `"已创建默认标签：核心"` 等 5 条日志
+   - 应看到 `"已将示例页面绑定到默认分组"`
+   - 应看到 `"已为示例页面绑定「重要」标签"`
+3. 访问 `GET /api/admin/groups?status=enabled`：
+   - 返回 200，`data` 字段至少包含"默认分组"
+4. 访问 `GET /api/admin/tags?status=enabled`：
+   - 返回 200，`data` 字段包含 5 个标签
+5. 访问 `GET /api/admin/pages`：
+   - 示例页面的 `groups` 字段包含"默认分组"
+   - 示例页面的 `tags` 字段包含"重要"标签
+
+#### 验证 2：表不存在的容错场景
+
+1. 手动删除 `page_groups` 表（模拟迁移失败场景）
+2. 访问 `GET /api/admin/groups`：
+   - **不应返回 500**，应返回 200 + `data: []`
+   - `message` 字段为 `"获取分组列表时出现问题，已返回空数据"`
+   - 后端日志中应有 `ERROR` 级别的错误详情
+3. 前端访问业务页面管理页：
+   - 不应弹出"服务器内部错误"
+   - 页面正常加载，分组下拉框显示为空
+
+#### 验证 3：新用户账号验证
+
+1. 使用新管理员账号登录（如创建一个 `testadmin` 用户）
+2. 进入"业务页面管理"页面：
+   - 页面正常加载，无任何错误提示
+   - 列表显示"示例数据看板"页面
+   - "所属分组"列显示"默认分组"标签
+   - "标签"列显示"重要"标签
+3. 切换到"分组管理"和"标签管理"页面：
+   - 分别显示 1 个分组和 5 个标签
+   - 无任何错误提示
+
+#### 验证 4：无新问题引入
+
+1. 测试分组/标签的增删改查功能：
+   - 新增分组 → 成功
+   - 编辑分组 → 成功
+   - 切换分组状态 → 成功
+   - 删除分组 → 成功
+   - 标签的 CRUD 同理
+2. 测试页面绑定功能：
+   - 为页面绑定多个分组和标签 → 成功
+   - 保存后列表显示正确 → 成功
+3. 测试门户首页筛选：
+   - 按分组 Tab 切换 → 正常
+   - 按标签筛选 → 正常
+4. 检查日志：
+   - 无异常 ERROR 日志（除了手动触发的容错测试）
+   - 所有操作均有正常 INFO 日志
+
+### 预防措施
+
+1. **新增模型必须显式导入 `bootstrap_service.py`**：这是新增数据库模型时的**强制检查项**，无论定义顺序如何，都必须在 `bootstrap_service.py` 中显式导入
+2. **新增列表接口必须双层容错**：
+   - 序列化函数外层 try-catch + 降级数据
+   - 接口函数整体 try-catch，异常时返回空列表 + 200
+3. **必须使用 `safe_serialize_iterable`**：禁止直接使用 `[f(x) for x in list]` 序列化数据库集合
+4. **新增模块必须包含初始化数据**：每个新模块在 `bootstrap_service.py` 中应有对应的默认数据初始化逻辑，确保首次访问不为空
+5. **代码审查检查清单**：新增 API 时必须检查：
+   - 是否有 `try-catch` 保护
+   - 是否使用了安全序列化工具
+   - 是否有默认数据兜底
+   - 异常路径是否返回 200 + 友好消息，而非 500

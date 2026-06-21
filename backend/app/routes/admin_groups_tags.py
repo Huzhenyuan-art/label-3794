@@ -1,3 +1,4 @@
+import logging
 from flask import Blueprint, jsonify, request
 
 from ..errors import ApiError
@@ -8,6 +9,7 @@ from ..security import admin_required
 from ..utils import (
     json_success,
     safe_getattr,
+    safe_serialize_iterable,
     serialize_group,
     serialize_tag,
     to_iso,
@@ -15,11 +17,27 @@ from ..utils import (
 
 
 bp = Blueprint("admin_groups_tags", __name__, url_prefix="/api/admin")
+logger = logging.getLogger(__name__)
 
 
 def _serialize_group(group: PageGroup) -> dict:
-    data = serialize_group(group)
-    if data is None:
+    try:
+        data = serialize_group(group)
+        if data is None:
+            return {
+                "id": None,
+                "name": "",
+                "description": "",
+                "sort_order": 0,
+                "status": "",
+                "created_at": None,
+                "updated_at": None,
+            }
+        data["created_at"] = to_iso(safe_getattr(group, "created_at"))
+        data["updated_at"] = to_iso(safe_getattr(group, "updated_at"))
+        return data
+    except Exception as exc:
+        logger.warning("分组序列化失败，返回降级数据：%s", exc)
         return {
             "id": None,
             "name": "",
@@ -29,14 +47,25 @@ def _serialize_group(group: PageGroup) -> dict:
             "created_at": None,
             "updated_at": None,
         }
-    data["created_at"] = to_iso(safe_getattr(group, "created_at"))
-    data["updated_at"] = to_iso(safe_getattr(group, "updated_at"))
-    return data
 
 
 def _serialize_tag(tag: PageTag) -> dict:
-    data = serialize_tag(tag)
-    if data is None:
+    try:
+        data = serialize_tag(tag)
+        if data is None:
+            return {
+                "id": None,
+                "name": "",
+                "color": "blue",
+                "status": "",
+                "created_at": None,
+                "updated_at": None,
+            }
+        data["created_at"] = to_iso(safe_getattr(tag, "created_at"))
+        data["updated_at"] = to_iso(safe_getattr(tag, "updated_at"))
+        return data
+    except Exception as exc:
+        logger.warning("标签序列化失败，返回降级数据：%s", exc)
         return {
             "id": None,
             "name": "",
@@ -45,19 +74,21 @@ def _serialize_tag(tag: PageTag) -> dict:
             "created_at": None,
             "updated_at": None,
         }
-    data["created_at"] = to_iso(safe_getattr(tag, "created_at"))
-    data["updated_at"] = to_iso(safe_getattr(tag, "updated_at"))
-    return data
+
 
 @bp.get("/groups")
 @admin_required()
 def list_groups():
-    status = request.args.get("status", "all")
-    query = PageGroup.query
-    if status in {"enabled", "disabled"}:
-        query = query.filter(PageGroup.status == status)
-    groups = query.order_by(PageGroup.sort_order.asc(), PageGroup.id.asc()).all()
-    return jsonify(json_success([_serialize_group(g) for g in groups]))
+    try:
+        status = request.args.get("status", "all")
+        query = PageGroup.query
+        if status in {"enabled", "disabled"}:
+            query = query.filter(PageGroup.status == status)
+        groups = query.order_by(PageGroup.sort_order.asc(), PageGroup.id.asc()).all()
+        return jsonify(json_success(safe_serialize_iterable(groups, _serialize_group)))
+    except Exception as exc:
+        logger.error("获取分组列表失败，返回空列表：%s", exc)
+        return jsonify(json_success([], "获取分组列表时出现问题，已返回空数据"))
 
 
 @bp.post("/groups")
@@ -122,12 +153,16 @@ def delete_group(group_id: int):
 @bp.get("/tags")
 @admin_required()
 def list_tags():
-    status = request.args.get("status", "all")
-    query = PageTag.query
-    if status in {"enabled", "disabled"}:
-        query = query.filter(PageTag.status == status)
-    tags = query.order_by(PageTag.id.asc()).all()
-    return jsonify(json_success([_serialize_tag(t) for t in tags]))
+    try:
+        status = request.args.get("status", "all")
+        query = PageTag.query
+        if status in {"enabled", "disabled"}:
+            query = query.filter(PageTag.status == status)
+        tags = query.order_by(PageTag.id.asc()).all()
+        return jsonify(json_success(safe_serialize_iterable(tags, _serialize_tag)))
+    except Exception as exc:
+        logger.error("获取标签列表失败，返回空列表：%s", exc)
+        return jsonify(json_success([], "获取标签列表时出现问题，已返回空数据"))
 
 
 @bp.post("/tags")

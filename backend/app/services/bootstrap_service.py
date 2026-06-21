@@ -5,7 +5,7 @@ import time
 from sqlalchemy import text
 
 from ..extensions import db
-from ..models import Admin, BusinessPage, DbConfig, SystemSetting, User
+from ..models import Admin, BusinessPage, DbConfig, PageGroup, PageTag, SystemSetting, User
 from ..security import encrypt_text, generate_api_token, hash_password, hash_token
 from .dynamic_table_service import create_record, ensure_dynamic_table
 
@@ -128,6 +128,37 @@ def initialize_defaults(app) -> None:
 
         db.session.commit()
 
+        default_group = PageGroup.query.filter_by(name="默认分组").first()
+        if not default_group:
+            default_group = PageGroup(
+                name="默认分组",
+                description="系统默认分组，用于归类未指定分组的页面",
+                sort_order=0,
+                status="enabled",
+            )
+            db.session.add(default_group)
+            logger.info("已创建默认分组：默认分组")
+
+        default_tags = [
+            {"name": "核心", "color": "red"},
+            {"name": "重要", "color": "orange"},
+            {"name": "常用", "color": "gold"},
+            {"name": "新功能", "color": "green"},
+            {"name": "维护中", "color": "default"},
+        ]
+        for tag_info in default_tags:
+            existing = PageTag.query.filter_by(name=tag_info["name"]).first()
+            if not existing:
+                new_tag = PageTag(
+                    name=tag_info["name"],
+                    color=tag_info["color"],
+                    status="enabled",
+                )
+                db.session.add(new_tag)
+                logger.info("已创建默认标签：%s", tag_info["name"])
+
+        db.session.commit()
+
         demo_folder = os.path.join(app.config["UPLOAD_ROOT"], "demo-sample")
         os.makedirs(demo_folder, exist_ok=True)
         index_path = os.path.join(demo_folder, "index.html")
@@ -154,6 +185,17 @@ def initialize_defaults(app) -> None:
             )
             db.session.add(demo_page)
             db.session.commit()
+
+        if default_group and demo_page not in default_group.pages:
+            default_group.pages.append(demo_page)
+            db.session.commit()
+            logger.info("已将示例页面绑定到默认分组")
+
+        important_tag = PageTag.query.filter_by(name="重要").first()
+        if important_tag and demo_page not in important_tag.pages:
+            important_tag.pages.append(demo_page)
+            db.session.commit()
+            logger.info("已为示例页面绑定「重要」标签")
 
         ensure_dynamic_table(demo_page.table_name)
         try:
