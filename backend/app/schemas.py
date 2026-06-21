@@ -112,6 +112,19 @@ class DbConfigPayload(BaseModel):
     table_prefix_rule: str = Field(min_length=3, max_length=64)
 
 
+class PayloadFilterCondition(BaseModel):
+    field: str = Field(min_length=1, max_length=128)
+    op: str = Field(pattern=r"^(eq|neq|gt|gte|lt|lte|like)$")
+    value: Any
+
+    @field_validator("field")
+    @classmethod
+    def validate_field(cls, value: str) -> str:
+        if "." in value:
+            raise ValueError("field 不支持嵌套路径")
+        return value
+
+
 class DataRecordCreatePayload(BaseModel):
     record_key: str = Field(min_length=1, max_length=128)
     payload: dict[str, Any]

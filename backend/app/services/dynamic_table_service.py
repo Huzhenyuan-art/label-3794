@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import JSON, Column, DateTime, Integer, MetaData, String, Table, delete, select
+from sqlalchemy import JSON, Column, DateTime, Integer, MetaData, String, Table, delete, func, select
 
 from ..errors import ApiError
 from ..extensions import db
@@ -46,11 +46,69 @@ def _load_table(table_name: str) -> Table:
         raise ApiError(404, "业务数据表不存在") from exc
 
 
-def list_records(table_name: str, limit: int, offset: int):
+_PAYLOAD_OP_MAP = {
+    "eq": lambda col, val: col == val,
+    "neq": lambda col, val: col != val,
+    "gt": lambda col, val: col > val,
+    "gte": lambda col, val: col >= val,
+    "lt": lambda col, val: col < val,
+    "lte": lambda col, val: col <= val,
+    "like": lambda col, val: col.like(val),
+}
+
+
+def _build_payload_clause(table, condition):
+    json_path = "$.{}".format(condition.field)
+    extracted = func.json_unquote(func.json_extract(table.c.payload, json_path))
+
+    op = condition.op
+    value = condition.value
+
+    if op in ("eq", "neq"):
+        if isinstance(value, str):
+            clause = _PAYLOAD_OP_MAP[op](extracted, value)
+        else:
+            raw_extracted = func.json_extract(table.c.payload, json_path)
+            clause = _PAYLOAD_OP_MAP[op](raw_extracted, value)
+    elif op == "like":
+        if not isinstance(value, str):
+            raise ApiError(422, "like 操作符的 value 必须为字符串")
+        clause = extracted.like(value)
+    else:
+        raw_extracted = func.json_extract(table.c.payload, json_path)
+        clause = _PAYLOAD_OP_MAP[op](raw_extracted, value)
+
+    return clause
+
+
+def list_records(
+    table_name: str,
+    limit: int,
+    offset: int,
+    record_key_prefix: str | None = None,
+    payload_filters: list | None = None,
+):
     table = _load_table(table_name)
-    stmt = select(table).limit(limit).offset(offset).order_by(table.c.id.desc())
-    rows = db.session.execute(stmt).mappings().all()
-    return rows
+    stmt = select(table)
+    count_stmt = select(func.count()).select_from(table)
+
+    if record_key_prefix:
+        escaped = record_key_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        prefix_clause = table.c.record_key.like("{}%".format(escaped), escape="\\")
+        stmt = stmt.where(prefix_clause)
+        count_stmt = count_stmt.where(prefix_clause)
+
+    if payload_filters:
+        for condition in payload_filters:
+            clause = _build_payload_clause(table, condition)
+            stmt = stmt.where(clause)
+            count_stmt = count_stmt.where(clause)
+
+    total = db.session.execute(count_stmt).scalar()
+    rows = db.session.execute(
+        stmt.limit(limit).offset(offset).order_by(table.c.id.desc())
+    ).mappings().all()
+    return rows, total
 
 
 def get_record(table_name: str, record_id: int):

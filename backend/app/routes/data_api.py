@@ -1,9 +1,12 @@
+import json
+
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt, verify_jwt_in_request
+from pydantic import ValidationError
 
 from ..errors import ApiError
 from ..models import BusinessPage
-from ..schemas import DataRecordCreatePayload, DataRecordUpdatePayload
+from ..schemas import DataRecordCreatePayload, DataRecordUpdatePayload, PayloadFilterCondition
 from ..security import hash_token
 from ..services.dynamic_table_service import (
     create_record,
@@ -51,9 +54,37 @@ def page_records(page_id: int):
 
     limit = min(int(request.args.get("limit", 50)), 100)
     offset = max(int(request.args.get("offset", 0)), 0)
-    rows = list_records(page.table_name, limit=limit, offset=offset)
 
-    return jsonify(json_success([_to_dict(row) for row in rows]))
+    record_key_prefix = request.args.get("record_key_prefix") or None
+
+    payload_filters = None
+    raw_filters = request.args.get("payload_filters")
+    if raw_filters:
+        try:
+            parsed = json.loads(raw_filters)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ApiError(422, "payload_filters 不是合法的 JSON") from exc
+        if not isinstance(parsed, list):
+            raise ApiError(422, "payload_filters 必须为 JSON 数组")
+        try:
+            payload_filters = [PayloadFilterCondition.model_validate(item) for item in parsed]
+        except ValidationError as exc:
+            raise ApiError(422, "payload_filters 格式校验失败") from exc
+
+    rows, total = list_records(
+        page.table_name,
+        limit=limit,
+        offset=offset,
+        record_key_prefix=record_key_prefix,
+        payload_filters=payload_filters,
+    )
+
+    return jsonify(json_success({
+        "records": [_to_dict(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }))
 
 
 @bp.post("/<int:page_id>/records")
