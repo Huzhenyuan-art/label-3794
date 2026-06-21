@@ -689,3 +689,98 @@ if (resp.require_captcha) {
 
 5. **安全验证**：
    - 登录成功后，再次使用同一个 `captcha_id` 提交，应提示"验证码已被使用"
+
+---
+
+## 五、前端构建失败：TypeScript 类型注解语法解析错误
+
+### 问题现象
+
+执行 `npm run build`（Vite 构建）时，报错提示语法解析错误，定位到 `AdminLoginPage.jsx` 中的箭头函数参数处。错误信息类似：
+
+```
+[vite:esbuild] Transform failed with 1 error:
+src/pages/AdminLoginPage.jsx:43:40: ERROR: Unexpected ":"
+```
+
+### 根因分析
+
+项目是一个纯 JavaScript / JSX 项目，不具备 TypeScript 转译能力，证据如下：
+
+| 配置项 | 状态 |
+|--------|------|
+| 文件后缀 | 全部为 `.js` / `.jsx`，无 `.ts` / `.tsx` |
+| `package.json` devDependencies | 仅 `vite`、`@vitejs/plugin-react`，**无 `typescript`** |
+| `tsconfig.json` | **不存在** |
+| `vite.config.js` | 无任何 TS 相关配置 |
+
+然而在 `frontend/src/pages/AdminLoginPage.jsx` 第 43 行，出现了 TypeScript 参数类型注解语法：
+
+```javascript
+const shouldRefreshCaptcha = (errMsg: string) => {
+```
+
+Vite 内部使用 esbuild 进行转译，对 `.jsx` 文件默认只处理 JSX 语法，**不会剥离 TypeScript 类型注解**，因此遇到 `:` 时报"Unexpected :"语法错误。
+
+> 注意：如果希望在 JS 项目中使用 TS 类型注解（JSDoc 之外的方式），需要将文件改为 `.tsx` 并安装 `typescript` 依赖、添加 `tsconfig.json`。但本项目的其他文件均为纯 JS，直接移除类型注解是最小改动、最符合项目规范的方案。
+
+### 修复方案
+
+移除 `.jsx` 文件中不属于 JavaScript 语法的 TypeScript 类型注解。
+
+**修改文件**：`frontend/src/pages/AdminLoginPage.jsx`
+
+| 修改前 | 修改后 |
+|--------|--------|
+| `const shouldRefreshCaptcha = (errMsg: string) => {` | `const shouldRefreshCaptcha = (errMsg) => {` |
+
+### 可选替代方案（如需类型检查）
+
+如果后续项目需要类型安全，可以考虑以下任一方案：
+
+**方案 A：使用 JSDoc 注释（无需改文件后缀）**
+
+```javascript
+/**
+ * 判断错误消息是否需要触发验证码刷新
+ * @param {string} errMsg - 后端返回的错误消息
+ * @returns {boolean}
+ */
+const shouldRefreshCaptcha = (errMsg) => {
+  return CAPTCHA_REFRESH_KEYWORDS.some((keyword) => errMsg.includes(keyword));
+};
+```
+
+JSDoc 是注释，Vite/esbuild 会自动忽略，编辑器仍可据此提供智能提示。
+
+**方案 B：全面切换到 TypeScript**
+
+```bash
+npm install -D typescript
+# 创建 tsconfig.json
+# 将 .jsx 文件重命名为 .tsx
+# 将 .js 文件重命名为 .ts
+```
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `frontend/src/pages/AdminLoginPage.jsx` | 移除 `errMsg: string` 中的 TypeScript 类型注解 |
+
+### 验证方法
+
+1. **静态扫描**：在 `frontend/src` 目录下全局搜索 `: string`、`: number`、`: boolean`、`Array<`、`Promise<` 等 TS 类型注解模式，确认无残留。
+2. **构建验证**：
+   ```bash
+   cd frontend
+   npm install
+   npm run build
+   ```
+   构建应成功完成，无任何语法解析错误。
+3. **运行验证**：启动 `npm run dev`，访问登录页，验证码刷新、登录提交等功能正常。
+
+### 预防措施
+
+- 在 `.eslintrc` 中启用 `no-restricted-syntax` 规则，禁止在 `.js` / `.jsx` 中使用 TS 类型注解语法
+- 如果团队需要类型系统，建议统一迁移至 TypeScript，避免混用

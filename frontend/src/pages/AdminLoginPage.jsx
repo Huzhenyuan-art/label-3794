@@ -40,7 +40,7 @@ function AdminLoginPage() {
     }
   }, []);
 
-  const shouldRefreshCaptcha = (errMsg: string) => {
+  const shouldRefreshCaptcha = (errMsg) => {
     return CAPTCHA_REFRESH_KEYWORDS.some((keyword) => errMsg.includes(keyword));
   };
 
