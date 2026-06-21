@@ -40,10 +40,19 @@ logger = logging.getLogger(__name__)
 
 
 def _build_share_url(page: BusinessPage) -> str:
-    try:
-        base_url = request.host_url.rstrip("/")
-    except Exception:
-        base_url = os.environ.get("APP_BASE_URL", "http://localhost:5173").rstrip("/")
+    app_base_url = os.environ.get("APP_BASE_URL", "").strip().rstrip("/")
+    if app_base_url:
+        base_url = app_base_url
+    else:
+        try:
+            from flask import request
+
+            scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+            host = request.headers.get("X-Forwarded-Host", request.host)
+            base_url = f"{scheme}://{host}"
+        except Exception:
+            base_url = "http://localhost:5173"
+
     route_path = safe_getattr(page, "route_path", "")
     return urljoin(base_url + "/", route_path.lstrip("/"))
 

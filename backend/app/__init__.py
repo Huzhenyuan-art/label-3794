@@ -1,6 +1,7 @@
 import os
 
 from flask import Flask, jsonify, send_from_directory
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .config import Config
 from .database_service import register_db_event_listeners
@@ -23,6 +24,14 @@ def create_app() -> Flask:
 
     app = Flask(__name__)
     app.config.from_object(Config)
+
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=1,
+        x_proto=1,
+        x_host=1,
+        x_prefix=1,
+    )
 
     os.makedirs(app.config["UPLOAD_ROOT"], exist_ok=True)
 

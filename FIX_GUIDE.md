@@ -2015,3 +2015,350 @@ APP_BASE_URL=http://your-domain.com
 4. **图片/文件类资源必须验证存在性**：不能只依赖数据库字段判断文件是否存在，必须实际检查文件系统
 5. **前端 Image 组件必须添加 fallback**：所有展示网络图片的 `Image` 组件，必须配置 `fallback` 属性，避免显示裂图
 6. **环境变量兜底**：所有依赖外部配置的功能（如域名、端口），必须提供合理的默认值，避免配置缺失导致崩溃
+
+---
+
+## 十一、Docker 环境 MySQL 连接偶发失败 + 二维码图片不显示 + 分享链接不正确
+
+### 问题现象
+
+在 Docker 部署环境下，出现以下三个关联问题：
+
+1. **MySQL 连接偶发失败**：backend 服务启动时偶发连接 MySQL 失败，导致容器崩溃退出，需要手动重启
+2. **二维码图片无法显示**：业务页面管理列表的"访问二维码"列显示空白或"加载失败"，浏览器控制台报 404 错误
+3. **分享链接不正确**：二维码中的链接或复制的分享链接指向内部地址（如 `http://backend:8000` 或 `http://localhost:5173`），外部无法访问
+
+### 根因分析
+
+#### 根因 1：MySQL 连接失败 — 缺少启动前健康检查 + 无自动重启
+
+| 问题 | 位置 | 原因 |
+|------|------|------|
+| 启动前未验证数据库 | `backend/Dockerfile` | 使用 `gunicorn --preload` 直接启动，预加载阶段数据库未就绪即崩溃 |
+| 无自动重启策略 | `docker-compose.yml` | backend 服务缺少 `restart` 配置，崩溃后不会自动恢复 |
+| 依赖检查不充分 | `docker-compose.yml` | 仅依赖 `service_healthy`，但 MySQL 健康检查通过不代表应用层连接一定成功 |
+
+**失败链路**：
+```
+Docker 启动 → MySQL 容器启动（健康检查通过）→ backend 启动 → gunicorn --preload 预加载 Flask 应用
+    → 尝试连接 MySQL（此时 MySQL 可能仍在初始化系统表）→ 连接失败 → 进程崩溃 → 容器停止
+    → 无 restart 策略 → 容器保持 Exited 状态
+```
+
+#### 根因 2：二维码图片无法显示 — Nginx 缺少 `/static/qrcodes/` 代理路由
+
+**文件**：[frontend/nginx.conf](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/frontend/nginx.conf)
+
+Nginx 配置中只代理了以下路径：
+```
+/api/          →  http://backend:8000/api/
+/pages/        →  http://backend:8000/pages/
+/              →  本地静态文件
+```
+
+但二维码图片的 URL 格式为 `/static/qrcodes/page_1_1234567890.png`，请求会被 Nginx 当作**本地静态文件**，去 `/usr/share/nginx/html/static/qrcodes/` 目录查找，当然找不到，返回 404。
+
+#### 根因 3：分享链接不正确 — 反向代理 Host 头处理不当 + 缺少 APP_BASE_URL 配置
+
+**问题 A：Flask 未正确处理反向代理的 Host**
+
+Flask 默认不信任 `X-Forwarded-*` 头，当请求经过 Nginx 反向代理后：
+- `request.host` 返回的是 Nginx 转发的内部地址 `backend:8000`
+- `request.scheme` 返回的是 `http`（即使用户访问的是 `https`）
+- 没有启用 `ProxyFix` 中间件来正确解析代理头
+
+**问题 B：缺少 APP_BASE_URL 环境变量**
+
+在 `docker-compose.yml` 中没有设置 `APP_BASE_URL`，导致：
+- 无请求上下文时（如启动阶段批量生成二维码）使用默认值 `http://localhost:5173`
+- 这是开发环境的地址，生产环境无法访问
+
+**问题 C：二维码目录未持久化**
+
+`docker-compose.yml` 中只挂载了 `/app/static/pages`，但二维码存储在 `/app/static/qrcodes/`，没有 volume 挂载：
+- 容器重启后，所有二维码图片丢失
+- 需要重新生成才能显示
+
+---
+
+### 修复方案
+
+#### 一、数据库连接稳定性（四层防护）
+
+##### 1. 新增容器级自动重启
+
+**文件**：[docker-compose.yml](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/docker-compose.yml#L28-L58)
+
+```yaml
+backend:
+  restart: on-failure:5  # ✅ 新增：失败时自动重启，最多 5 次
+  # ... 其他配置
+```
+
+##### 2. 新增启动前数据库等待脚本
+
+**新建文件**：[backend/wait-for-db.sh](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/wait-for-db.sh)
+
+```bash
+#!/bin/bash
+set -e
+
+MAX_RETRIES=30
+RETRY_INTERVAL=2
+
+echo "等待数据库连接就绪..."
+
+for attempt in $(seq 1 $MAX_RETRIES); do
+    if python -c "
+# 使用 SQLAlchemy 直接连接验证，执行 SELECT 1
+# 失败则等待后重试
+" 2>&1; then
+        echo "数据库已就绪，启动应用..."
+        exec "$@"
+    fi
+    sleep $RETRY_INTERVAL
+done
+
+echo "数据库连接重试次数已达上限，启动失败"
+exit 1
+```
+
+**关键特性**：
+- 最多重试 30 次，每次间隔 2 秒（最长等待约 1 分钟）
+- 使用 Python + SQLAlchemy 验证，确保应用层连接可用
+- 验证成功后才执行 gunicorn 启动命令
+
+##### 3. 修改 Dockerfile 使用等待脚本
+
+**文件**：[backend/Dockerfile](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/Dockerfile)
+
+```dockerfile
+COPY wait-for-db.sh /app/wait-for-db.sh
+RUN chmod +x /app/wait-for-db.sh
+
+# 修改前
+CMD ["gunicorn", "--preload", "-w", "4", "-b", "0.0.0.0:8000", "run:app"]
+
+# 修改后
+CMD ["/app/wait-for-db.sh", "gunicorn", "--preload", "-w", "4", "-b", "0.0.0.0:8000", "run:app"]
+```
+
+##### 4. 环境变量化数据库连接池参数
+
+**文件**：[docker-compose.yml](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/docker-compose.yml#L46-L50)
+
+```yaml
+environment:
+  DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-1800}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-40}
+  DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+  DB_POOL_PRE_PING: "true"
+```
+
+#### 二、二维码静态资源代理
+
+**文件**：[frontend/nginx.conf](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/frontend/nginx.conf#L24-L36)
+
+新增 `/static/qrcodes/` 代理路由：
+
+```nginx
+location /static/qrcodes/ {
+    proxy_pass http://backend:8000/static/qrcodes/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+}
+```
+
+同时，在已有的 `/api/` 和 `/pages/` 路由中也添加 `X-Forwarded-Proto` 和 `X-Forwarded-Host` 头。
+
+#### 三、二维码数据持久化
+
+**文件**：[docker-compose.yml](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/docker-compose.yml#L56-L72)
+
+```yaml
+services:
+  backend:
+    volumes:
+      - pages_data:/app/static/pages
+      - qrcodes_data:/app/static/qrcodes  # ✅ 新增：二维码目录持久化
+
+volumes:
+  db_data:
+  pages_data:
+  qrcodes_data:  # ✅ 新增：二维码 volume
+```
+
+#### 四、分享链接正确性
+
+##### 1. 启用 Flask ProxyFix 中间件
+
+**文件**：[backend/app/__init__.py](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/app/__init__.py#L4-L34)
+
+```python
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+def create_app() -> Flask:
+    # ...
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=1,      # 信任 X-Forwarded-For
+        x_proto=1,    # 信任 X-Forwarded-Proto（协议）
+        x_host=1,     # 信任 X-Forwarded-Host（主机名）
+        x_prefix=1,   # 信任 X-Forwarded-Prefix
+    )
+```
+
+**ProxyFix 参数说明**：
+- `x_for=1`：信任 1 层代理的 X-Forwarded-For 头
+- `x_proto=1`：信任 X-Forwarded-Proto 头，正确识别 http/https
+- `x_host=1`：信任 X-Forwarded-Host 头，获取用户实际访问的域名
+- `x_prefix=1`：信任 X-Forwarded-Prefix 头
+
+##### 2. 新增 APP_BASE_URL 环境变量
+
+**文件**：[docker-compose.yml](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/docker-compose.yml#L45)
+
+```yaml
+environment:
+  APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+```
+
+**默认值说明**：Docker 环境下前端暴露在 3000 端口，所以默认值设为 `http://localhost:3000`。
+
+##### 3. 增强 `_build_share_url()` 函数
+
+**文件**：[backend/app/routes/admin_pages.py](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/app/routes/admin_pages.py#L42-L57)
+
+```python
+def _build_share_url(page: BusinessPage) -> str:
+    # 优先级 1：环境变量 APP_BASE_URL（最高优先级，明确指定）
+    app_base_url = os.environ.get("APP_BASE_URL", "").strip().rstrip("/")
+    if app_base_url:
+        base_url = app_base_url
+    else:
+        # 优先级 2：从请求头获取（支持反向代理）
+        try:
+            from flask import request
+            scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+            host = request.headers.get("X-Forwarded-Host", request.host)
+            base_url = f"{scheme}://{host}"
+        except Exception:
+            # 优先级 3：兜底默认值
+            base_url = "http://localhost:5173"
+
+    route_path = safe_getattr(page, "route_path", "")
+    return urljoin(base_url + "/", route_path.lstrip("/"))
+```
+
+---
+
+### 修复效果验证
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| MySQL 偶发连接失败 | 容器崩溃后停止，需手动重启 | 自动重试 30 次 + 失败自动重启最多 5 次 |
+| 二维码图片请求 | Nginx 返回 404 | 正确代理到 backend，返回二维码图片 |
+| 分享链接（有请求上下文） | `http://backend:8000/pages/...` | `http://your-domain.com/pages/...` |
+| 分享链接（无请求上下文） | `http://localhost:5173/pages/...` | `http://localhost:3000/pages/...`（可配置） |
+| 容器重启后二维码 | 全部丢失，需重新生成 | 持久化存储，保持不变 |
+| HTTPS 环境下的链接 | `http://your-domain.com/...` | `https://your-domain.com/...` |
+
+---
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `docker-compose.yml` | 新增 `restart: on-failure:5`；新增 `APP_BASE_URL` 环境变量；新增数据库连接池参数；新增 `qrcodes_data` volume 挂载 |
+| `frontend/nginx.conf` | 新增 `/static/qrcodes/` 代理路由；为所有代理路由添加 `X-Forwarded-Proto` 和 `X-Forwarded-Host` 头 |
+| `backend/Dockerfile` | 新增 `wait-for-db.sh` 脚本复制和执行权限；CMD 改为先执行等待脚本 |
+| `backend/wait-for-db.sh` | **新建**：启动前数据库连接验证脚本，最多重试 30 次 |
+| `backend/app/__init__.py` | 新增 `ProxyFix` 中间件，正确处理反向代理头 |
+| `backend/app/routes/admin_pages.py` | 增强 `_build_share_url()`，支持 `APP_BASE_URL` 环境变量和 `X-Forwarded-*` 头 |
+
+---
+
+### 验证方法
+
+#### 验证 1：MySQL 连接稳定性
+
+1. 完全冷启动（删除所有 volume 和容器）：
+   ```bash
+   docker compose down -v
+   docker compose up --build
+   ```
+2. 观察 backend 容器日志：
+   - 应看到 `"等待数据库连接就绪..."`
+   - 数据库就绪后看到 `"数据库已就绪，启动应用..."`
+3. 模拟 MySQL 连接失败：
+   ```bash
+   docker compose restart db
+   # 观察 backend 是否能自动恢复
+   ```
+4. 检查重启策略：
+   ```bash
+   docker inspect label-portal-backend | grep RestartPolicy
+   # 应返回 "Name": "on-failure", "MaximumRetryCount": 5
+   ```
+
+#### 验证 2：二维码图片可访问
+
+1. 进入业务页面管理页面，确认二维码缩略图正常显示
+2. 浏览器开发者工具查看网络请求：
+   - 请求 URL 应为 `/static/qrcodes/page_xxx.png`
+   - 状态码应为 200，返回 image/png 内容
+3. 直接访问二维码 URL：
+   ```
+   http://localhost:3000/static/qrcodes/page_1_1234567890.png
+   ```
+   应能正常显示二维码图片
+
+#### 验证 3：分享链接正确性
+
+1. **HTTP 环境**（默认）：
+   - 点击"复制分享链接"，剪贴板内容应为 `http://localhost:3000/pages/...`
+   - 二维码扫码后访问的地址也应相同
+
+2. **配置自定义域名**：
+   ```bash
+   # 在 .env 中设置
+   APP_BASE_URL=https://portal.example.com
+   docker compose up -d
+   ```
+   - 复制的分享链接应为 `https://portal.example.com/pages/...`
+
+3. **HTTPS 反向代理**：
+   - 在 Nginx 前配置 HTTPS 反向代理（如 Cloudflare、AWS ALB）
+   - 确保代理服务器设置 `X-Forwarded-Proto: https` 和 `X-Forwarded-Host`
+   - 分享链接应自动使用 `https://` 协议
+
+#### 验证 4：二维码持久化
+
+1. 生成一些二维码后，重启 backend 容器：
+   ```bash
+   docker compose restart backend
+   ```
+2. 刷新业务页面管理页面：
+   - 所有二维码应保持不变，无需重新生成
+3. 检查 volume：
+   ```bash
+   docker volume ls | grep qrcodes
+   # 应存在 label-3794_qrcodes_data volume
+   ```
+
+---
+
+### 预防措施
+
+1. **所有 Docker 服务必须配置重启策略**：核心服务（backend、db）必须配置 `restart: unless-stopped` 或 `restart: on-failure:N`
+2. **启动脚本必须包含依赖检查**：对于依赖外部服务（数据库、缓存、消息队列）的应用，启动前必须验证依赖可用
+3. **新增静态资源路径必须同步更新 Nginx 配置**：每次新增后端静态资源路由，必须在 `nginx.conf` 中添加对应的代理配置
+4. **反向代理环境必须配置 ProxyFix**：Flask 应用在反向代理后必须启用 `ProxyFix` 中间件，否则 URL 生成会出错
+5. **外部可访问的 URL 必须可配置**：任何生成给外部用户访问的链接（分享链接、二维码、邮件链接等），必须通过环境变量可配置
+6. **文件存储必须持久化**：所有用户上传或系统生成的文件（页面、二维码、头像等），必须挂载到 Docker volume
+7. **代理头必须完整传递**：Nginx 反向代理必须传递 `X-Forwarded-For`、`X-Forwarded-Proto`、`X-Forwarded-Host` 三个核心头

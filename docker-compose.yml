@@ -26,6 +26,7 @@ services:
     build:
       context: ./backend
     container_name: label-portal-backend
+    restart: on-failure:5
     environment:
       TZ: Asia/Shanghai
       FLASK_ENV: production
@@ -41,6 +42,12 @@ services:
       MAX_LOGIN_ATTEMPTS: ${MAX_LOGIN_ATTEMPTS:-5}
       LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-15}
       CAPTCHA_REQUIRED_THRESHOLD: ${CAPTCHA_REQUIRED_THRESHOLD:-2}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-1800}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-40}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+      DB_POOL_PRE_PING: "true"
     depends_on:
       db:
         condition: service_healthy
@@ -48,6 +55,7 @@ services:
       - "8000:8000"
     volumes:
       - pages_data:/app/static/pages
+      - qrcodes_data:/app/static/qrcodes
 
   frontend:
     build:
@@ -61,3 +69,4 @@ services:
 volumes:
   db_data:
   pages_data:
+  qrcodes_data:
