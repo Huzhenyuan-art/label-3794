@@ -21,7 +21,7 @@ def _record_login_audit(username: str, success: bool, reason: str | None, ip: st
     db.session.add(LoginAudit(username=username, success=success, reason=reason, ip_address=ip))
 
 
-def _handle_failed_attempt(admin: Admin, username: str, reason: str, ip: str) -> None:
+def _handle_password_failed(admin: Admin, username: str, reason: str, ip: str) -> None:
     admin.failed_login_attempts += 1
     now = beijing_now()
     final_reason = reason
@@ -70,18 +70,19 @@ def admin_login():
         )
 
     if admin.failed_login_attempts >= threshold:
-        if not verify_captcha(payload.captcha_id, payload.captcha_code):
-            _handle_failed_attempt(admin, payload.username, "验证码错误", ip)
+        if not payload.captcha_id or not payload.captcha_code:
+            _record_login_audit(payload.username, False, "验证码缺失", ip)
             db.session.commit()
-            remaining = current_app.config["MAX_LOGIN_ATTEMPTS"] - admin.failed_login_attempts
-            raise ApiError(
-                401,
-                "验证码错误" if remaining > 0 else "连续登录失败，账号已临时锁定",
-                extra={"require_captcha": True},
-            )
+            raise ApiError(401, "请输入验证码", extra={"require_captcha": True})
+
+        ok, captcha_msg = verify_captcha(payload.captcha_id, payload.captcha_code)
+        if not ok:
+            _record_login_audit(payload.username, False, f"验证码错误({captcha_msg})", ip)
+            db.session.commit()
+            raise ApiError(401, captcha_msg, extra={"require_captcha": True})
 
     if not verify_password(payload.password, admin.password_hash):
-        _handle_failed_attempt(admin, payload.username, "密码错误", ip)
+        _handle_password_failed(admin, payload.username, "密码错误", ip)
         db.session.commit()
         need_captcha = admin.failed_login_attempts >= threshold
         remaining = current_app.config["MAX_LOGIN_ATTEMPTS"] - admin.failed_login_attempts

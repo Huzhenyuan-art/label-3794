@@ -14,46 +14,67 @@ _store_lock = threading.Lock()
 
 CAPTCHA_TTL_SECONDS = 300
 CAPTCHA_THRESHOLD = 2
+CAPTCHA_MAX_RETRIES = 10
+CAPTCHA_COOLDOWN_SECONDS = 5
 
 
 def _generate_code(length: int = 4) -> str:
     chars = string.ascii_uppercase + string.digits
-    return "".join(random.choices(chars, k=length))
+    filtered = chars.replace("O", "").replace("0", "").replace("I", "").replace("1", "").replace("L", "")
+    return "".join(random.choices(filtered, k=length))
 
 
 def _draw_captcha_image(code: str) -> bytes:
-    width, height = 130, 48
-    image = Image.new("RGB", (width, height), (245, 245, 245))
+    char_count = len(code)
+    char_width = 46
+    padding_x = 24
+    padding_y = 8
+    width = padding_x * 2 + char_width * char_count + (char_count - 1) * 4
+    height = 64
+
+    image = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(image)
 
-    for _ in range(6):
+    for _ in range(4):
         x1 = random.randint(0, width)
         y1 = random.randint(0, height)
         x2 = random.randint(0, width)
         y2 = random.randint(0, height)
         draw.line(
             [(x1, y1), (x2, y2)],
-            fill=(random.randint(150, 200), random.randint(150, 200), random.randint(150, 200)),
+            fill=(random.randint(200, 230), random.randint(200, 230), random.randint(200, 230)),
             width=1,
         )
 
-    for _ in range(30):
+    for _ in range(15):
         x = random.randint(0, width)
         y = random.randint(0, height)
         draw.point(
             (x, y),
-            fill=(random.randint(100, 200), random.randint(100, 200), random.randint(100, 200)),
+            fill=(random.randint(180, 220), random.randint(180, 220), random.randint(180, 220)),
         )
 
     try:
-        font = ImageFont.truetype("arial.ttf", 30)
+        font = ImageFont.truetype("arial.ttf", 42)
     except OSError:
-        font = ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("Arial.ttf", 42)
+        except OSError:
+            font = ImageFont.load_default(size=42)
+
+    bold_colors = [
+        (0, 0, 0),
+        (30, 30, 80),
+        (80, 20, 20),
+        (20, 60, 20),
+        (60, 20, 80),
+        (0, 40, 80),
+    ]
 
     for i, ch in enumerate(code):
-        x = 18 + i * 28
-        y = random.randint(5, 12)
-        color = (random.randint(30, 100), random.randint(30, 100), random.randint(30, 100))
+        x = padding_x + i * (char_width + 4)
+        y = random.randint(padding_y, padding_y + 6)
+        color = random.choice(bold_colors)
         draw.text((x, y), ch, font=font, fill=color)
 
     buf = io.BytesIO()
@@ -71,22 +92,42 @@ def create_captcha() -> tuple[str, bytes]:
         for cid in list(_captcha_store.keys()):
             if _captcha_store[cid]["expire_at"] < now:
                 del _captcha_store[cid]
-        _captcha_store[captcha_id] = {"code": code, "expire_at": now + CAPTCHA_TTL_SECONDS}
+        _captcha_store[captcha_id] = {
+            "code": code,
+            "expire_at": now + CAPTCHA_TTL_SECONDS,
+            "fail_count": 0,
+            "last_fail_at": 0.0,
+        }
 
     return captcha_id, image_bytes
 
 
-def verify_captcha(captcha_id: Optional[str], user_code: Optional[str]) -> bool:
+def verify_captcha(captcha_id: Optional[str], user_code: Optional[str]) -> tuple[bool, str]:
     if not captcha_id or not user_code:
-        return False
+        return False, "验证码参数缺失"
 
     with _store_lock:
-        entry = _captcha_store.pop(captcha_id, None)
+        entry = _captcha_store.get(captcha_id)
+        if not entry:
+            return False, "验证码已失效，请刷新"
 
-    if not entry:
-        return False
+        if entry["expire_at"] < time.time():
+            _captcha_store.pop(captcha_id, None)
+            return False, "验证码已过期，请刷新"
 
-    if entry["expire_at"] < time.time():
-        return False
+        now = time.time()
+        if now - entry["last_fail_at"] < CAPTCHA_COOLDOWN_SECONDS:
+            return False, "操作过于频繁，请稍后重试"
 
-    return user_code.strip().upper() == entry["code"].upper()
+        if user_code.strip().upper() == entry["code"].upper():
+            _captcha_store.pop(captcha_id, None)
+            return True, ""
+
+        entry["fail_count"] += 1
+        entry["last_fail_at"] = now
+
+        if entry["fail_count"] >= CAPTCHA_MAX_RETRIES:
+            _captcha_store.pop(captcha_id, None)
+            return False, "验证码错误次数过多，已失效，请刷新"
+
+        return False, "验证码错误"
