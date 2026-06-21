@@ -45,6 +45,10 @@ def _authorize_page(page: BusinessPage) -> None:
         raise ApiError(401, "缺少有效的业务页面访问 Token")
 
 
+MAX_RECORD_KEY_PREFIX_LENGTH = 128
+MAX_PAYLOAD_FILTERS = 20
+
+
 @bp.get("/<int:page_id>/records")
 def page_records(page_id: int):
     page = BusinessPage.query.get(page_id)
@@ -56,6 +60,8 @@ def page_records(page_id: int):
     offset = max(int(request.args.get("offset", 0)), 0)
 
     record_key_prefix = request.args.get("record_key_prefix") or None
+    if record_key_prefix and len(record_key_prefix) > MAX_RECORD_KEY_PREFIX_LENGTH:
+        raise ApiError(422, "record_key_prefix 长度不得超过 {} 字符".format(MAX_RECORD_KEY_PREFIX_LENGTH))
 
     payload_filters = None
     raw_filters = request.args.get("payload_filters")
@@ -66,10 +72,12 @@ def page_records(page_id: int):
             raise ApiError(422, "payload_filters 不是合法的 JSON") from exc
         if not isinstance(parsed, list):
             raise ApiError(422, "payload_filters 必须为 JSON 数组")
+        if len(parsed) > MAX_PAYLOAD_FILTERS:
+            raise ApiError(422, "payload_filters 最多允许 {} 个条件".format(MAX_PAYLOAD_FILTERS))
         try:
             payload_filters = [PayloadFilterCondition.model_validate(item) for item in parsed]
         except ValidationError as exc:
-            raise ApiError(422, "payload_filters 格式校验失败") from exc
+            raise ApiError(422, "payload_filters 格式校验失败", details=exc.errors()) from exc
 
     rows, total = list_records(
         page.table_name,

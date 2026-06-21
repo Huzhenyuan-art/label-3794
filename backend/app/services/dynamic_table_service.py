@@ -1,8 +1,9 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import JSON, Column, DateTime, Integer, MetaData, String, Table, delete, func, select
+from sqlalchemy import JSON, Column, DateTime, Integer, MetaData, String, Table, cast, delete, func, select
 
+from ..database_service import safe_db_execute
 from ..errors import ApiError
 from ..extensions import db
 
@@ -53,32 +54,51 @@ _PAYLOAD_OP_MAP = {
     "gte": lambda col, val: col >= val,
     "lt": lambda col, val: col < val,
     "lte": lambda col, val: col <= val,
-    "like": lambda col, val: col.like(val),
 }
 
 
+_NUMERIC_OPS = {"gt", "gte", "lt", "lte"}
+
+
 def _build_payload_clause(table, condition):
-    json_path = "$.{}".format(condition.field)
-    extracted = func.json_unquote(func.json_extract(table.c.payload, json_path))
+    json_path = func.json_extract(table.c.payload, "$.{}".format(condition.field))
 
     op = condition.op
     value = condition.value
 
-    if op in ("eq", "neq"):
-        if isinstance(value, str):
-            clause = _PAYLOAD_OP_MAP[op](extracted, value)
-        else:
-            raw_extracted = func.json_extract(table.c.payload, json_path)
-            clause = _PAYLOAD_OP_MAP[op](raw_extracted, value)
-    elif op == "like":
+    if op == "like":
         if not isinstance(value, str):
             raise ApiError(422, "like 操作符的 value 必须为字符串")
-        clause = extracted.like(value)
-    else:
-        raw_extracted = func.json_extract(table.c.payload, json_path)
-        clause = _PAYLOAD_OP_MAP[op](raw_extracted, value)
+        extracted_str = func.json_unquote(json_path)
+        escaped_val = (
+            value
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        return extracted_str.like("{}%".format(escaped_val), escape="\\")
 
-    return clause
+    if op in ("eq", "neq"):
+        if isinstance(value, str):
+            extracted_str = func.json_unquote(json_path)
+            return _PAYLOAD_OP_MAP[op](extracted_str, value)
+        elif isinstance(value, bool):
+            extracted_raw = json_path
+            return _PAYLOAD_OP_MAP[op](extracted_raw, value)
+        elif isinstance(value, (int, float)):
+            extracted_num = cast(json_path, type(value))
+            return _PAYLOAD_OP_MAP[op](extracted_num, value)
+        else:
+            extracted_raw = json_path
+            return _PAYLOAD_OP_MAP[op](extracted_raw, value)
+
+    if op in _NUMERIC_OPS:
+        if not isinstance(value, (int, float)):
+            raise ApiError(422, "{} 操作符的 value 必须为数字".format(op))
+        extracted_num = cast(json_path, type(value))
+        return _PAYLOAD_OP_MAP[op](extracted_num, value)
+
+    raise ApiError(422, "不支持的操作符: {}".format(op))
 
 
 def list_records(
@@ -104,17 +124,18 @@ def list_records(
             stmt = stmt.where(clause)
             count_stmt = count_stmt.where(clause)
 
-    total = db.session.execute(count_stmt).scalar()
-    rows = db.session.execute(
-        stmt.limit(limit).offset(offset).order_by(table.c.id.desc())
-    ).mappings().all()
+    count_result = safe_db_execute(count_stmt).scalar()
+    total = count_result if count_result is not None else 0
+
+    stmt = stmt.limit(limit).offset(offset).order_by(table.c.id.desc())
+    rows = safe_db_execute(stmt).mappings().all()
     return rows, total
 
 
 def get_record(table_name: str, record_id: int):
     table = _load_table(table_name)
     stmt = select(table).where(table.c.id == record_id)
-    row = db.session.execute(stmt).mappings().first()
+    row = safe_db_execute(stmt).mappings().first()
     if not row:
         raise ApiError(404, "记录不存在")
     return row
@@ -122,12 +143,12 @@ def get_record(table_name: str, record_id: int):
 
 def create_record(table_name: str, record_key: str, payload: dict):
     table = _load_table(table_name)
-    existing = db.session.execute(select(table.c.id).where(table.c.record_key == record_key)).first()
+    existing = safe_db_execute(select(table.c.id).where(table.c.record_key == record_key)).first()
     if existing:
         raise ApiError(409, "record_key 已存在")
 
     stmt = table.insert().values(record_key=record_key, payload=payload, created_at=_now(), updated_at=_now())
-    result = db.session.execute(stmt)
+    result = safe_db_execute(stmt)
     db.session.commit()
     return get_record(table_name, result.inserted_primary_key[0])
 
@@ -137,7 +158,7 @@ def update_record(table_name: str, record_id: int, record_key: str | None, paylo
     current = get_record(table_name, record_id)
 
     if record_key and record_key != current["record_key"]:
-        conflict = db.session.execute(
+        conflict = safe_db_execute(
             select(table.c.id).where(table.c.record_key == record_key, table.c.id != record_id)
         ).first()
         if conflict:
@@ -148,12 +169,12 @@ def update_record(table_name: str, record_id: int, record_key: str | None, paylo
         "payload": payload if payload is not None else current["payload"],
         "updated_at": _now(),
     }
-    db.session.execute(table.update().where(table.c.id == record_id).values(**update_payload))
+    safe_db_execute(table.update().where(table.c.id == record_id).values(**update_payload))
     db.session.commit()
     return get_record(table_name, record_id)
 
 
 def delete_record_by_id(table_name: str, record_id: int) -> None:
     table = _load_table(table_name)
-    db.session.execute(delete(table).where(table.c.id == record_id))
+    safe_db_execute(delete(table).where(table.c.id == record_id))
     db.session.commit()

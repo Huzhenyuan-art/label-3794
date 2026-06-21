@@ -1,7 +1,11 @@
+import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+
+_FIELD_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 class LoginPayload(BaseModel):
     username: str = Field(min_length=3, max_length=64)
@@ -122,6 +126,16 @@ class PayloadFilterCondition(BaseModel):
     def validate_field(cls, value: str) -> str:
         if "." in value:
             raise ValueError("field 不支持嵌套路径")
+        if not _FIELD_NAME_PATTERN.match(value):
+            raise ValueError("field 仅支持字母、数字、下划线，且必须以字母或下划线开头")
+        return value
+
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, value: Any, info) -> Any:
+        op = info.data.get("op")
+        if op == "like" and not isinstance(value, str):
+            raise ValueError("like 操作符的 value 必须为字符串")
         return value
 
 
