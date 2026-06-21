@@ -8,6 +8,7 @@ from ..errors import ApiError
 from ..models import BusinessPage
 from ..schemas import DataRecordCreatePayload, DataRecordUpdatePayload, PayloadFilterCondition
 from ..security import hash_token
+from ..services.cache_service import cache_service
 from ..services.dynamic_table_service import (
     create_record,
     delete_record_by_id,
@@ -79,6 +80,17 @@ def page_records(page_id: int):
         except ValidationError as exc:
             raise ApiError(422, "payload_filters 格式校验失败", details=exc.errors()) from exc
 
+    cache_params = {
+        "limit": limit,
+        "offset": offset,
+        "record_key_prefix": record_key_prefix,
+        "payload_filters": raw_filters,
+    }
+    cache_key = cache_service.make_record_list_key(page_id, cache_params)
+    cached = cache_service.get(cache_key)
+    if cached is not None:
+        return jsonify(json_success(cached))
+
     rows, total = list_records(
         page.table_name,
         limit=limit,
@@ -87,12 +99,15 @@ def page_records(page_id: int):
         payload_filters=payload_filters,
     )
 
-    return jsonify(json_success({
+    result = {
         "records": [_to_dict(row) for row in rows],
         "total": total,
         "limit": limit,
         "offset": offset,
-    }))
+    }
+    cache_service.set(cache_key, result)
+
+    return jsonify(json_success(result))
 
 
 @bp.post("/<int:page_id>/records")
@@ -104,6 +119,7 @@ def create_page_record(page_id: int):
 
     payload = DataRecordCreatePayload.model_validate(request.get_json(silent=True) or {})
     record = create_record(page.table_name, payload.record_key, payload.payload)
+    cache_service.invalidate_page_cache(page_id)
     return jsonify(json_success(_to_dict(record), "记录创建成功")), 201
 
 
@@ -114,8 +130,15 @@ def get_page_record(page_id: int, record_id: int):
         raise ApiError(404, "业务页面不存在")
     _authorize_page(page)
 
+    cache_key = cache_service.make_record_single_key(page_id, record_id)
+    cached = cache_service.get(cache_key)
+    if cached is not None:
+        return jsonify(json_success(cached))
+
     record = get_record(page.table_name, record_id)
-    return jsonify(json_success(_to_dict(record)))
+    result = _to_dict(record)
+    cache_service.set(cache_key, result)
+    return jsonify(json_success(result))
 
 
 @bp.put("/<int:page_id>/records/<int:record_id>")
@@ -128,6 +151,7 @@ def update_page_record(page_id: int, record_id: int):
 
     payload = DataRecordUpdatePayload.model_validate(request.get_json(silent=True) or {})
     record = update_record(page.table_name, record_id, payload.record_key, payload.payload)
+    cache_service.invalidate_page_cache(page_id)
     return jsonify(json_success(_to_dict(record), "记录更新成功"))
 
 
@@ -139,4 +163,5 @@ def delete_page_record(page_id: int, record_id: int):
     _authorize_page(page)
 
     delete_record_by_id(page.table_name, record_id)
+    cache_service.invalidate_page_cache(page_id)
     return jsonify(json_success(message="记录删除成功"))

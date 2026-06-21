@@ -87,3 +87,14 @@ class Config:
         "ps1",
         "jar",
     ]
+
+    REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+    REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+    REDIS_CACHE_TTL = int(os.getenv("REDIS_CACHE_TTL", "300"))
+    REDIS_CACHE_ENABLED = os.getenv("REDIS_CACHE_ENABLED", "true").lower() == "true"
+
+    CACHE_KEY_PREFIX = "label_portal"
+    CACHE_KEY_RECORD_LIST = "record_list"
+    CACHE_KEY_RECORD_SINGLE = "record_single"

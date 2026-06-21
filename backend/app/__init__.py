@@ -18,6 +18,7 @@ from .routes.auth import bp as auth_bp
 from .routes.data_api import bp as data_api_bp
 from .routes.public import bp as public_bp
 from .services.bootstrap_service import initialize_defaults
+from .services.cache_service import cache_service
 
 
 def create_app() -> Flask:
@@ -38,6 +39,7 @@ def create_app() -> Flask:
 
     db.init_app(app)
     jwt.init_app(app)
+    cache_service.init_app(app)
 
     register_error_handlers(app)
 

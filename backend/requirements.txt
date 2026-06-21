@@ -10,3 +10,4 @@ cryptography==44.0.0
 gunicorn==23.0.0
 Pillow==10.4.0
 qrcode==7.4.2
+redis==5.2.1

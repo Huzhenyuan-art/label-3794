@@ -1,4 +1,21 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: label-portal-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
   db:
     image: mysql:8.0
     container_name: label-portal-db
@@ -38,6 +55,10 @@ services:
       DB_USER: root
       DB_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
       DB_NAME: ${MYSQL_DATABASE:-label_portal}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_CACHE_TTL: 300
       MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-100}
       MAX_LOGIN_ATTEMPTS: ${MAX_LOGIN_ATTEMPTS:-5}
       LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-15}
@@ -50,6 +71,8 @@ services:
       DB_POOL_PRE_PING: "true"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     ports:
       - "8000:8000"
@@ -70,3 +93,4 @@ volumes:
   db_data:
   pages_data:
   qrcodes_data:
+  redis_data:
