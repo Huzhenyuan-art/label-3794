@@ -1,3 +1,4 @@
+import logging
 import os
 import secrets
 import time
@@ -5,6 +6,7 @@ import time
 from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import get_jwt
 from sqlalchemy import text
+from sqlalchemy.orm import selectinload
 
 from ..errors import ApiError
 from ..extensions import db
@@ -14,30 +16,48 @@ from ..security import admin_required, generate_api_token, hash_token
 from ..services.dynamic_table_service import drop_dynamic_table, ensure_dynamic_table
 from ..services.notification_service import NOTIFICATION_TYPES, create_notification
 from ..services.storage_service import delete_assets, store_uploaded_assets
-from ..utils import json_success, to_iso
+from ..utils import (
+    json_success,
+    safe_getattr,
+    safe_serialize_iterable,
+    serialize_group,
+    serialize_groups_collection,
+    serialize_tag,
+    serialize_tags_collection,
+    to_iso,
+)
 
 
 bp = Blueprint("admin_pages", __name__, url_prefix="/api/admin/pages")
+logger = logging.getLogger(__name__)
 
 
 def _serialize_page(page: BusinessPage) -> dict:
+    try:
+        groups = serialize_groups_collection(safe_getattr(page, "groups", []))
+        tags = serialize_tags_collection(safe_getattr(page, "tags", []))
+    except Exception as exc:
+        logger.warning("序列化页面关联数据失败，降级为空列表：%s", exc)
+        groups = []
+        tags = []
+
     return {
-        "id": page.id,
-        "name": page.name,
-        "description": page.description,
-        "category": page.category,
-        "developer": page.developer,
-        "main_page": page.main_page,
-        "storage_folder": page.storage_folder,
-        "route_path": page.route_path,
-        "table_prefix": page.table_prefix,
-        "table_name": page.table_name,
-        "status": page.status,
-        "uploader_admin_id": page.uploader_admin_id,
-        "created_at": to_iso(page.created_at),
-        "updated_at": to_iso(page.updated_at),
-        "groups": [{"id": g.id, "name": g.name} for g in page.groups],
-        "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in page.tags],
+        "id": safe_getattr(page, "id"),
+        "name": safe_getattr(page, "name", ""),
+        "description": safe_getattr(page, "description", ""),
+        "category": safe_getattr(page, "category", ""),
+        "developer": safe_getattr(page, "developer", ""),
+        "main_page": safe_getattr(page, "main_page", ""),
+        "storage_folder": safe_getattr(page, "storage_folder", ""),
+        "route_path": safe_getattr(page, "route_path", ""),
+        "table_prefix": safe_getattr(page, "table_prefix", ""),
+        "table_name": safe_getattr(page, "table_name", ""),
+        "status": safe_getattr(page, "status", ""),
+        "uploader_admin_id": safe_getattr(page, "uploader_admin_id"),
+        "created_at": to_iso(safe_getattr(page, "created_at")),
+        "updated_at": to_iso(safe_getattr(page, "updated_at")),
+        "groups": groups,
+        "tags": tags,
     }
 
 
@@ -71,12 +91,15 @@ def _generate_table_prefix(page_id: int | None = None) -> str:
 @admin_required()
 def list_pages():
     status = request.args.get("status", "all")
-    query = BusinessPage.query
+    query = BusinessPage.query.options(
+        selectinload(BusinessPage.groups),
+        selectinload(BusinessPage.tags),
+    )
     if status in {"enabled", "disabled"}:
         query = query.filter(BusinessPage.status == status)
 
     pages = query.order_by(BusinessPage.created_at.desc()).all()
-    return jsonify(json_success([_serialize_page(page) for page in pages]))
+    return jsonify(json_success(safe_serialize_iterable(pages, _serialize_page)))
 
 
 @bp.post("")

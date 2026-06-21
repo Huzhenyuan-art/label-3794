@@ -5,34 +5,49 @@ from ..extensions import db
 from ..models import PageGroup, PageTag
 from ..schemas import GroupCreatePayload, GroupUpdatePayload, TagCreatePayload, TagUpdatePayload
 from ..security import admin_required
-from ..utils import json_success, to_iso
+from ..utils import (
+    json_success,
+    safe_getattr,
+    serialize_group,
+    serialize_tag,
+    to_iso,
+)
 
 
 bp = Blueprint("admin_groups_tags", __name__, url_prefix="/api/admin")
 
 
 def _serialize_group(group: PageGroup) -> dict:
-    return {
-        "id": group.id,
-        "name": group.name,
-        "description": group.description,
-        "sort_order": group.sort_order,
-        "status": group.status,
-        "created_at": to_iso(group.created_at),
-        "updated_at": to_iso(group.updated_at),
-    }
+    data = serialize_group(group)
+    if data is None:
+        return {
+            "id": None,
+            "name": "",
+            "description": "",
+            "sort_order": 0,
+            "status": "",
+            "created_at": None,
+            "updated_at": None,
+        }
+    data["created_at"] = to_iso(safe_getattr(group, "created_at"))
+    data["updated_at"] = to_iso(safe_getattr(group, "updated_at"))
+    return data
 
 
 def _serialize_tag(tag: PageTag) -> dict:
-    return {
-        "id": tag.id,
-        "name": tag.name,
-        "color": tag.color,
-        "status": tag.status,
-        "created_at": to_iso(tag.created_at),
-        "updated_at": to_iso(tag.updated_at),
-    }
-
+    data = serialize_tag(tag)
+    if data is None:
+        return {
+            "id": None,
+            "name": "",
+            "color": "blue",
+            "status": "",
+            "created_at": None,
+            "updated_at": None,
+        }
+    data["created_at"] = to_iso(safe_getattr(tag, "created_at"))
+    data["updated_at"] = to_iso(safe_getattr(tag, "updated_at"))
+    return data
 
 @bp.get("/groups")
 @admin_required()

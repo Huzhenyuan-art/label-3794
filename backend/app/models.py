@@ -144,5 +144,15 @@ class BusinessPage(db.Model):
     updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
 
     uploader = db.relationship("Admin", lazy=True)
-    groups = db.relationship("PageGroup", secondary=page_group_association, lazy="subquery")
-    tags = db.relationship("PageTag", secondary=page_tag_association, lazy="subquery")
+    groups = db.relationship(
+        "PageGroup",
+        secondary=page_group_association,
+        lazy="selectin",
+        backref=db.backref("pages", lazy="selectin"),
+    )
+    tags = db.relationship(
+        "PageTag",
+        secondary=page_tag_association,
+        lazy="selectin",
+        backref=db.backref("pages", lazy="selectin"),
+    )

@@ -1,25 +1,45 @@
 from flask import Blueprint, jsonify, request
 from sqlalchemy import or_
+from sqlalchemy.orm import selectinload
 
 from ..extensions import db
 from ..models import BusinessPage, PageGroup, PageTag
-from ..utils import json_success, to_iso
+from ..utils import (
+    json_success,
+    safe_getattr,
+    safe_serialize_iterable,
+    serialize_group,
+    serialize_groups_collection,
+    serialize_tag,
+    serialize_tags_collection,
+    to_iso,
+)
 
 
 bp = Blueprint("public", __name__, url_prefix="/api/public")
 
 
 def _serialize(page: BusinessPage) -> dict:
+    try:
+        groups = serialize_groups_collection(safe_getattr(page, "groups", []))
+    except Exception as exc:
+        groups = []
+
+    try:
+        tags = serialize_tags_collection(safe_getattr(page, "tags", []))
+    except Exception as exc:
+        tags = []
+
     return {
-        "id": page.id,
-        "name": page.name,
-        "description": page.description,
-        "category": page.category,
-        "developer": page.developer,
-        "route_path": page.route_path,
-        "created_at": to_iso(page.created_at),
-        "groups": [{"id": g.id, "name": g.name} for g in page.groups],
-        "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in page.tags],
+        "id": safe_getattr(page, "id"),
+        "name": safe_getattr(page, "name", ""),
+        "description": safe_getattr(page, "description", ""),
+        "category": safe_getattr(page, "category", ""),
+        "developer": safe_getattr(page, "developer", ""),
+        "route_path": safe_getattr(page, "route_path", ""),
+        "created_at": to_iso(safe_getattr(page, "created_at")),
+        "groups": groups,
+        "tags": tags,
     }
 
 
@@ -31,7 +51,10 @@ def list_public_pages():
     tag_ids = request.args.get("tag_ids", "").strip()
     time_sort = request.args.get("time_sort", "newest")
 
-    query = BusinessPage.query.filter(BusinessPage.status == "enabled")
+    query = BusinessPage.query.options(
+        selectinload(BusinessPage.groups),
+        selectinload(BusinessPage.tags),
+    ).filter(BusinessPage.status == "enabled")
 
     if keyword:
         fuzzy = f"%{keyword}%"
@@ -62,7 +85,7 @@ def list_public_pages():
         query = query.order_by(BusinessPage.created_at.desc())
 
     pages = query.all()
-    return jsonify(json_success([_serialize(page) for page in pages]))
+    return jsonify(json_success(safe_serialize_iterable(pages, _serialize)))
 
 
 @bp.get("/categories")
@@ -75,12 +98,30 @@ def list_categories():
 @bp.get("/groups")
 def list_public_groups():
     groups = PageGroup.query.filter_by(status="enabled").order_by(PageGroup.sort_order.asc(), PageGroup.id.asc()).all()
-    result = [{"id": g.id, "name": g.name, "description": g.description} for g in groups]
+    result = []
+    for g in safe_serialize_iterable(groups, serialize_group):
+        if g.get("id") is not None:
+            result.append(
+                {
+                    "id": g.get("id"),
+                    "name": g.get("name", ""),
+                    "description": g.get("description", ""),
+                }
+            )
     return jsonify(json_success(result))
 
 
 @bp.get("/tags")
 def list_public_tags():
     tags = PageTag.query.filter_by(status="enabled").order_by(PageTag.id.asc()).all()
-    result = [{"id": t.id, "name": t.name, "color": t.color} for t in tags]
+    result = []
+    for t in safe_serialize_iterable(tags, serialize_tag):
+        if t.get("id") is not None:
+            result.append(
+                {
+                    "id": t.get("id"),
+                    "name": t.get("name", ""),
+                    "color": t.get("color", "blue"),
+                }
+            )
     return jsonify(json_success(result))
