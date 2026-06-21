@@ -545,5 +545,147 @@ CAPTCHA_COOLDOWN_SECONDS = 5      # 连续错误间隔至少 5 秒
 1. **验证码可读性**：连续输错 2 次密码触发验证码后，验证码图片中字符应清晰可辨，与背景对比明显
 2. **刷新功能**：点击验证码图片或右侧刷新按钮，验证码应更新且输入框清空
 3. **锁定策略**：连续输错验证码 10 次，账号不应被锁定，仅验证码失效需刷新
-4. **冷却机制**：验证码错误后 5 秒内再次提交，应提示"操作过于频繁"
+4. **冷却机制**：验证码错误后 2 秒内再次提交，应提示"操作过于频繁"
 5. **审计记录**：验证码错误在 `login_audit` 中的 reason 字段应包含具体错误类型
+
+---
+
+## 四、验证码持续失效问题修复（"验证码已失效，请刷新"）
+
+### 问题现象
+
+用户在触发验证码流程后，即便输入了正确的验证码，也持续收到"验证码已失效，请刷新"的错误提示，无法正常登录，必须多次刷新验证码才能偶然成功。
+
+### 根因分析
+
+经排查，问题由**前后端多环节叠加**导致，核心根因有三个：
+
+| 序号 | 问题 | 位置 | 影响 |
+|------|------|------|------|
+| 1 | **验证码验证成功即删除** | `captcha_service.py` `verify_captcha()` 第 123 行 `_captcha_store.pop(captcha_id, None)` | 用户验证码正确 + 密码错误 → 验证码已被删除 → 下次提交必然失效 |
+| 2 | **前端刷新逻辑不合理** | `AdminLoginPage.jsx` `handleSubmit()` 第 58 行 | 仅当错误包含"失效"/"过期"才刷新，密码错误时不刷新，验证码已被删但仍用旧 ID 提交 |
+| 3 | **有效期过短** | `captcha_service.py` `CAPTCHA_TTL_SECONDS = 300` | 5 分钟有效期，用户思考 + 输入 + 密码错误重试后容易过期 |
+
+**最核心根因（#1）**：验证码匹配成功时立即 `pop` 删除记录。登录流程是"先验验证码，再验密码"，如果验证码通过但密码错误，验证码已经被删除，用户第二次提交时 `captcha_id` 不存在，直接报"已失效"。
+
+### 修复方案
+
+#### 1. 后端：重构验证码生命周期管理
+
+**文件**：`backend/app/services/captcha_service.py`
+
+##### 核心改动："验证通过标记、登录成功才删除"
+
+| 改动项 | 修改前 | 修改后 |
+|--------|--------|--------|
+| 有效期 | `CAPTCHA_TTL_SECONDS = 300`（5分钟） | `CAPTCHA_TTL_SECONDS = 600`（10分钟） |
+| 冷却时间 | `CAPTCHA_COOLDOWN_SECONDS = 5` | `CAPTCHA_COOLDOWN_SECONDS = 2`（提升响应速度） |
+| 新增配置 | - | `CAPTCHA_MAX_VERIFICATIONS = 3`（同一验证码最多成功验证 3 次） |
+| 存储字段 | `fail_count`、`last_fail_at` | 新增 `success_count`（成功验证次数） |
+| 验证成功 | 立即 `pop` 删除记录 | 递增 `success_count`，不删除 |
+| 成功次数超限 | - | 达到 3 次后删除，需刷新 |
+| 新增函数 | - | `consume_captcha()`：登录成功后调用，彻底删除验证码 |
+
+##### 关键逻辑：
+
+```python
+def verify_captcha(captcha_id, user_code) -> tuple[bool, str]:
+    # ... 前置检查（存在性、过期、冷却）...
+    
+    if user_code == entry["code"]:
+        entry["success_count"] += 1  # 标记成功，不删除
+        return True, ""
+    
+    # ... 失败处理 ...
+
+
+def consume_captcha(captcha_id) -> None:
+    """登录成功后调用，彻底删除验证码"""
+    with _store_lock:
+        _captcha_store.pop(captcha_id, None)
+```
+
+#### 2. 后端：登录流程调用 `consume_captcha`
+
+**文件**：`backend/app/routes/auth.py`
+
+```python
+# 密码验证成功后，再删除验证码
+if not verify_password(payload.password, admin.password_hash):
+    # ... 密码错误处理（此时验证码仍有效）...
+
+# ✅ 密码验证通过，登录即将成功，才彻底删除验证码
+if payload.captcha_id:
+    consume_captcha(payload.captcha_id)
+
+# ... 后续登录成功逻辑 ...
+```
+
+#### 3. 前端：智能刷新策略
+
+**文件**：`frontend/src/pages/AdminLoginPage.jsx`
+
+```javascript
+const CAPTCHA_REFRESH_KEYWORDS = ['失效', '过期', '次数过多', '已被使用'];
+
+const shouldRefreshCaptcha = (errMsg) => {
+  return CAPTCHA_REFRESH_KEYWORDS.some((keyword) => errMsg.includes(keyword));
+};
+
+// 登录失败时的处理：
+if (resp.require_captcha) {
+  setRequireCaptcha(true);
+  if (!captchaId || shouldRefreshCaptcha(errMsg)) {
+    fetchCaptcha();  // 真正需要刷新时才刷新
+  } else if (formRef.current) {
+    formRef.current.setFieldValue('captcha_code', '');  // 否则只清空输入框
+  }
+}
+```
+
+| 错误类型 | 处理方式 |
+|----------|---------|
+| 验证码已失效/过期/次数过多/已被使用 | 自动刷新验证码 |
+| 验证码错误，还可尝试 X 次 | 仅清空输入框，保留当前验证码 |
+| 密码错误（验证码已通过） | 仅清空密码，验证码可继续使用 |
+
+#### 4. 错误提示优化（更友好的中文表达）
+
+| 场景 | 修改前 | 修改后 |
+|------|--------|--------|
+| 参数缺失 | "验证码参数缺失" | "请输入验证码" |
+| 验证码不存在 | "验证码已失效，请刷新" | "验证码已失效，请点击右侧刷新按钮重新获取" |
+| 验证码过期 | "验证码已过期，请刷新" | "验证码已过期，请点击右侧刷新按钮重新获取" |
+| 已被使用 | - | "验证码已被使用，请点击右侧刷新按钮重新获取" |
+| 成功次数过多 | - | "验证码使用次数过多，请点击右侧刷新按钮重新获取" |
+| 操作频繁 | "操作过于频繁，请稍后重试" | "操作过于频繁，请稍后重试" |
+| 错误次数过多 | "验证码错误次数过多，已失效，请刷新" | "验证码错误次数过多，请点击右侧刷新按钮重新获取" |
+| 普通错误 | "验证码错误" | "验证码错误，还可尝试 X 次，看不清可点击右侧刷新" |
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `backend/app/services/captcha_service.py` | 重构生命周期管理、新增 `consume_captcha`、延长有效期、优化提示 |
+| `backend/app/routes/auth.py` | 登录成功后才调用 `consume_captcha` 删除验证码 |
+| `frontend/src/pages/AdminLoginPage.jsx` | 智能刷新策略、根据错误类型决定是否刷新 |
+
+### 验证方法
+
+1. **验证码正确 + 密码错误场景**：
+   - 触发验证码后，输入正确验证码 + 错误密码
+   - 应提示"用户名或密码错误"，**不提示验证码失效**
+   - 再次提交时，使用同一个验证码，输入正确密码，应能登录成功
+
+2. **验证码多次验证场景**：
+   - 同一验证码最多可成功验证 3 次，第 4 次应提示"验证码使用次数过多，请刷新"
+
+3. **验证码过期场景**：
+   - 获取验证码后等待 10 分钟再提交，应提示"验证码已过期"
+
+4. **前端刷新场景**：
+   - 验证码错误时，应提示剩余尝试次数，仅清空输入框，**不刷新验证码**
+   - 提示"失效"/"过期"/"次数过多"时，应**自动刷新验证码**
+
+5. **安全验证**：
+   - 登录成功后，再次使用同一个 `captcha_id` 提交，应提示"验证码已被使用"

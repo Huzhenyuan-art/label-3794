@@ -12,10 +12,11 @@ from PIL import Image, ImageDraw, ImageFont
 _captcha_store: dict[str, dict] = {}
 _store_lock = threading.Lock()
 
-CAPTCHA_TTL_SECONDS = 300
+CAPTCHA_TTL_SECONDS = 600
 CAPTCHA_THRESHOLD = 2
 CAPTCHA_MAX_RETRIES = 10
-CAPTCHA_COOLDOWN_SECONDS = 5
+CAPTCHA_COOLDOWN_SECONDS = 2
+CAPTCHA_MAX_VERIFICATIONS = 3
 
 
 def _generate_code(length: int = 4) -> str:
@@ -97,6 +98,7 @@ def create_captcha() -> tuple[str, bytes]:
             "expire_at": now + CAPTCHA_TTL_SECONDS,
             "fail_count": 0,
             "last_fail_at": 0.0,
+            "success_count": 0,
         }
 
     return captcha_id, image_bytes
@@ -104,23 +106,27 @@ def create_captcha() -> tuple[str, bytes]:
 
 def verify_captcha(captcha_id: Optional[str], user_code: Optional[str]) -> tuple[bool, str]:
     if not captcha_id or not user_code:
-        return False, "验证码参数缺失"
+        return False, "请输入验证码"
 
     with _store_lock:
         entry = _captcha_store.get(captcha_id)
         if not entry:
-            return False, "验证码已失效，请刷新"
+            return False, "验证码已失效，请点击右侧刷新按钮重新获取"
 
         if entry["expire_at"] < time.time():
             _captcha_store.pop(captcha_id, None)
-            return False, "验证码已过期，请刷新"
+            return False, "验证码已过期，请点击右侧刷新按钮重新获取"
+
+        if entry["success_count"] >= CAPTCHA_MAX_VERIFICATIONS:
+            _captcha_store.pop(captcha_id, None)
+            return False, "验证码使用次数过多，请点击右侧刷新按钮重新获取"
 
         now = time.time()
-        if now - entry["last_fail_at"] < CAPTCHA_COOLDOWN_SECONDS:
+        if entry["fail_count"] > 0 and now - entry["last_fail_at"] < CAPTCHA_COOLDOWN_SECONDS:
             return False, "操作过于频繁，请稍后重试"
 
         if user_code.strip().upper() == entry["code"].upper():
-            _captcha_store.pop(captcha_id, None)
+            entry["success_count"] += 1
             return True, ""
 
         entry["fail_count"] += 1
@@ -128,6 +134,14 @@ def verify_captcha(captcha_id: Optional[str], user_code: Optional[str]) -> tuple
 
         if entry["fail_count"] >= CAPTCHA_MAX_RETRIES:
             _captcha_store.pop(captcha_id, None)
-            return False, "验证码错误次数过多，已失效，请刷新"
+            return False, "验证码错误次数过多，请点击右侧刷新按钮重新获取"
 
-        return False, "验证码错误"
+        remaining = CAPTCHA_MAX_RETRIES - entry["fail_count"]
+        return False, f"验证码错误，还可尝试 {remaining} 次，看不清可点击右侧刷新"
+
+
+def consume_captcha(captcha_id: Optional[str]) -> None:
+    if not captcha_id:
+        return
+    with _store_lock:
+        _captcha_store.pop(captcha_id, None)

@@ -9,7 +9,7 @@ from ..extensions import db
 from ..models import Admin, LoginAudit, beijing_now
 from ..schemas import LoginPayload
 from ..security import admin_required, generate_csrf_token, verify_password
-from ..services.captcha_service import CAPTCHA_THRESHOLD, create_captcha, verify_captcha
+from ..services.captcha_service import CAPTCHA_THRESHOLD, consume_captcha, create_captcha, verify_captcha
 from ..services.notification_service import NOTIFICATION_TYPES, create_notification
 from ..utils import json_success, to_iso
 
@@ -69,14 +69,16 @@ def admin_login():
             extra={"require_captcha": True},
         )
 
+    captcha_ok = True
+    captcha_msg = ""
     if admin.failed_login_attempts >= threshold:
         if not payload.captcha_id or not payload.captcha_code:
             _record_login_audit(payload.username, False, "验证码缺失", ip)
             db.session.commit()
             raise ApiError(401, "请输入验证码", extra={"require_captcha": True})
 
-        ok, captcha_msg = verify_captcha(payload.captcha_id, payload.captcha_code)
-        if not ok:
+        captcha_ok, captcha_msg = verify_captcha(payload.captcha_id, payload.captcha_code)
+        if not captcha_ok:
             _record_login_audit(payload.username, False, f"验证码错误({captcha_msg})", ip)
             db.session.commit()
             raise ApiError(401, captcha_msg, extra={"require_captcha": True})
@@ -91,6 +93,9 @@ def admin_login():
             "用户名或密码错误" if remaining > 0 else "连续登录失败，账号已临时锁定",
             extra={"require_captcha": need_captcha},
         )
+
+    if payload.captcha_id:
+        consume_captcha(payload.captcha_id)
 
     admin.failed_login_attempts = 0
     admin.locked_until = None

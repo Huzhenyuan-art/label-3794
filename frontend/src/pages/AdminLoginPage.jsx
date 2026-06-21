@@ -7,6 +7,8 @@ import http, { extractErrorMessage } from '../services/http';
 
 const { Title, Text } = Typography;
 
+const CAPTCHA_REFRESH_KEYWORDS = ['失效', '过期', '次数过多', '已被使用'];
+
 function AdminLoginPage() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
@@ -38,6 +40,10 @@ function AdminLoginPage() {
     }
   }, []);
 
+  const shouldRefreshCaptcha = (errMsg: string) => {
+    return CAPTCHA_REFRESH_KEYWORDS.some((keyword) => errMsg.includes(keyword));
+  };
+
   const handleSubmit = async (values) => {
     setLoading(true);
     try {
@@ -55,8 +61,10 @@ function AdminLoginPage() {
       const errMsg = extractErrorMessage(error);
       if (resp.require_captcha) {
         setRequireCaptcha(true);
-        if (!captchaId || errMsg.includes('失效') || errMsg.includes('过期') || errMsg.includes('过期')) {
+        if (!captchaId || shouldRefreshCaptcha(errMsg)) {
           fetchCaptcha();
+        } else if (formRef.current) {
+          formRef.current.setFieldValue('captcha_code', '');
         }
       }
       message.error(errMsg);
