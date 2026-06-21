@@ -1,4 +1,202 @@
-# MySQL 连接失败问题修复指南（FIX_GUIDE）
+# 问题修复指南（FIX_GUIDE）
+
+---
+
+## 一、通知中心图标在顶部导航栏不可见
+
+### 问题现象
+
+管理员登录后台后，在顶部导航栏中看不到消息通知铃铛图标，也看不到"当前管理员"文字，但退出登录按钮可以正常显示。
+
+### 根因分析
+
+**颜色冲突：白色图标/文字 + 白色背景 = 完全不可见**
+
+在 `frontend/src/styles.css` 中，`.dashboard-header` 的背景色配置为：
+
+```css
+.dashboard-header {
+  background: rgba(255, 255, 255, 0.92) !important;  /* 白色半透明 */
+}
+```
+
+但在前端代码中，却将图标和文字颜色设为了白色：
+
+| 位置 | 错误设置 | 结果 |
+|------|---------|------|
+| `NotificationCenter.jsx` 第 161-162 行 | `color: '#fff'` | 铃铛图标白色 |
+| `AdminDashboardPage.jsx` 第 89 行 | `style={{ color: '#fff' }}` | 管理员文本白色 |
+
+白色 (`#fff`) 在白色背景 (`rgba(255,255,255,0.92)`) 上对比度几乎为零，视觉上完全不可见。
+
+### 修复方案
+
+#### 1. 修复 NotificationCenter 组件
+
+**文件**：`frontend/src/components/NotificationCenter.jsx`
+
+将内联样式替换为 CSS 类名，在样式表中统一管理颜色：
+
+修改前：
+```jsx
+<Badge count={unreadCount} size="small" offset={[-4, 4]}>
+  <Button
+    type="text"
+    icon={<BellOutlined style={{ fontSize: 18, color: '#fff' }} />}
+    style={{ color: '#fff', padding: '0 8px' }}
+  />
+</Badge>
+```
+
+修改后：
+```jsx
+<Badge count={unreadCount} size="small" offset={[-2, 6]}>
+  <Button
+    type="text"
+    className="notification-bell-btn"
+    icon={<BellOutlined className="notification-bell-icon" />}
+  />
+</Badge>
+```
+
+#### 2. 修复 AdminDashboardPage 布局
+
+**文件**：`frontend/src/pages/AdminDashboardPage.jsx`
+
+- 移除内联 `color: '#fff'`，改用 CSS 类名
+- 将内联 flex 布局样式改为 CSS 类名，便于响应式控制
+
+修改前：
+```jsx
+<Header className="dashboard-header">
+  <div style={{ flex: 1 }} />
+  <Space size="middle" align="center">
+    <NotificationCenter />
+    <Text style={{ color: '#fff' }}>当前管理员：...</Text>
+    <Button onClick={logout}>退出登录</Button>
+  </Space>
+</Header>
+```
+
+修改后：
+```jsx
+<Header className="dashboard-header">
+  <div className="dashboard-header-spacer" />
+  <Space size="middle" align="center" className="dashboard-header-actions">
+    <NotificationCenter />
+    <Text className="dashboard-header-text">当前管理员：...</Text>
+    <Button onClick={logout}>退出登录</Button>
+  </Space>
+</Header>
+```
+
+#### 3. 添加 CSS 样式（适配浅色背景 + 响应式）
+
+**文件**：`frontend/src/styles.css`
+
+新增以下样式：
+
+```css
+/* ===== 顶部 header 元素 ===== */
+.dashboard-header-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.dashboard-header-actions {
+  flex-shrink: 0;
+}
+
+.dashboard-header-text {
+  color: #162338 !important;   /* 深色文字，适配白色背景 */
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* ===== 通知铃铛按钮 ===== */
+.notification-bell-btn {
+  width: 40px !important;
+  height: 40px !important;
+  min-width: 40px !important;
+  padding: 0 !important;
+  border-radius: 8px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transition: background-color 0.2s ease !important;
+}
+
+.notification-bell-btn:hover {
+  background-color: rgba(24, 102, 255, 0.08) !important;  /* hover 蓝色高亮 */
+}
+
+.notification-bell-btn:active {
+  background-color: rgba(24, 102, 255, 0.15) !important;  /* 按下更深 */
+}
+
+.notification-bell-icon {
+  font-size: 18px;
+  color: #162338;   /* 深色图标，适配白色背景 */
+  line-height: 1;
+}
+```
+
+#### 4. 添加响应式适配（移动端）
+
+在 `@media (max-width: 768px)` 块中新增：
+
+```css
+/* 后台 header 小屏适配 */
+.dashboard-header {
+  padding-inline: 12px !important;
+  flex-wrap: nowrap;
+}
+
+.dashboard-header-spacer {
+  display: none;   /* 小屏移除占位，让内容紧凑展示 */
+}
+
+.dashboard-header-text {
+  font-size: 13px !important;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notification-bell-btn {
+  width: 36px !important;
+  height: 36px !important;
+  min-width: 36px !important;
+}
+
+.notification-bell-icon {
+  font-size: 16px !important;
+}
+```
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `frontend/src/components/NotificationCenter.jsx` | 移除白色内联样式，改用 CSS 类名 |
+| `frontend/src/pages/AdminDashboardPage.jsx` | 移除白色文字样式，改用 CSS 类名 |
+| `frontend/src/styles.css` | 新增 header 元素样式、铃铛按钮样式、移动端响应式样式 |
+
+### 验证方法
+
+1. **标准屏幕（>768px）**：
+   - 打开管理后台，顶部右侧应清晰可见：🔔铃铛图标 + 管理员名称 + 退出按钮
+   - 鼠标悬停铃铛图标，背景应有浅蓝色高亮
+   - 点击铃铛图标，消息列表面板正常弹出
+
+2. **小屏手机（≤768px）**：
+   - 铃铛图标缩小至 36px，不影响整体布局
+   - 管理员名称过长时自动省略号截断
+   - 所有元素水平排列不换行
+
+---
+
+## 二、MySQL 连接失败问题修复指南
 
 ## 问题现象
 

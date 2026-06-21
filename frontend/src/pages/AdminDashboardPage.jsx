@@ -83,10 +83,10 @@ function AdminDashboardPage() {
 
       <Layout>
         <Header className="dashboard-header">
-          <div style={{ flex: 1 }} />
-          <Space size="middle" align="center">
+          <div className="dashboard-header-spacer" />
+          <Space size="middle" align="center" className="dashboard-header-actions">
             <NotificationCenter />
-            <Text style={{ color: '#fff' }}>当前管理员：{admin?.username || '-'}</Text>
+            <Text className="dashboard-header-text">当前管理员：{admin?.username || '-'}</Text>
             <Button onClick={logout}>退出登录</Button>
           </Space>
         </Header>

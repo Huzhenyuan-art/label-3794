@@ -296,6 +296,49 @@ body {
   backdrop-filter: blur(10px);
   border-bottom: 1px solid rgba(24, 102, 255, 0.08);
   padding-inline: 24px;
+  gap: 0;
+}
+
+.dashboard-header-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.dashboard-header-actions {
+  flex-shrink: 0;
+}
+
+.dashboard-header-text {
+  color: #162338 !important;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* ===== 通知铃铛按钮 ===== */
+.notification-bell-btn {
+  width: 40px !important;
+  height: 40px !important;
+  min-width: 40px !important;
+  padding: 0 !important;
+  border-radius: 8px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transition: background-color 0.2s ease !important;
+}
+
+.notification-bell-btn:hover {
+  background-color: rgba(24, 102, 255, 0.08) !important;
+}
+
+.notification-bell-btn:active {
+  background-color: rgba(24, 102, 255, 0.15) !important;
+}
+
+.notification-bell-icon {
+  font-size: 18px;
+  color: #162338;
+  line-height: 1;
 }
 
 .dashboard-content {
@@ -334,5 +377,32 @@ body {
 
   .dashboard-content {
     margin: 10px;
+  }
+
+  /* 后台 header 小屏适配 */
+  .dashboard-header {
+    padding-inline: 12px !important;
+    flex-wrap: nowrap;
+  }
+
+  .dashboard-header-spacer {
+    display: none;
+  }
+
+  .dashboard-header-text {
+    font-size: 13px !important;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .notification-bell-btn {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+  }
+
+  .notification-bell-icon {
+    font-size: 16px !important;
   }
 }

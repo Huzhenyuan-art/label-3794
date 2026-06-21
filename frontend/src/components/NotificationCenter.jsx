@@ -155,11 +155,11 @@ function NotificationCenter() {
       placement="bottomRight"
       arrow
     >
-      <Badge count={unreadCount} size="small" offset={[-4, 4]}>
+      <Badge count={unreadCount} size="small" offset={[-2, 6]}>
         <Button
           type="text"
-          icon={<BellOutlined style={{ fontSize: 18, color: '#fff' }} />}
-          style={{ color: '#fff', padding: '0 8px' }}
+          className="notification-bell-btn"
+          icon={<BellOutlined className="notification-bell-icon" />}
         />
       </Badge>
     </Popover>
