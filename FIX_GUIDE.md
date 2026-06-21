@@ -2893,3 +2893,216 @@ import {
    grep -rn "from 'antd'" src/ | grep -E "(Outlined|Filled|TwoTone)" | grep -v "//"
    ```
 5. **统一导入风格**：参考项目中已有的组件（如 HomePage.jsx、AdminDashboardPage.jsx）的导入方式，保持一致
+
+---
+
+## 十四、models.py 关联表定义顺序不当导致 User 模型加载失败（NameError）
+
+### 问题现象
+
+在开发「普通用户登录与个人工作台模块」时，新增了 `User` 与 `BusinessPage` 之间的多对多关联关系 `user_page_association`，但由于关联表变量的定义位置在 `User` 模型类之后，导致 Python 解释器在执行 `User` 类体时引用了尚未定义的变量，抛出 `NameError` 异常，应用无法启动。
+
+典型错误信息：
+```
+NameError: name 'user_page_association' is not defined
+  File "app/models.py", line 41, in User
+    secondary=user_page_association,
+```
+
+### 根因分析
+
+#### 1. Python 顺序解释执行机制
+
+Python 是**顺序解释执行**的语言，类定义体中的代码会在类被声明时立即执行。
+
+**修改前的定义顺序**（错误）：
+
+| 行号 | 定义内容 | 依赖 |
+|------|---------|------|
+| L27-L44 | `class User` | `user_page_association` 变量（第 41 行 `secondary=user_page_association` 引用） |
+| L101-L105 | `page_group_association = db.Table(...)` | 无（使用字符串 `"business_pages.id"`、`"page_groups.id"`） |
+| L107-L111 | `page_tag_association = db.Table(...)` | 无（使用字符串 `"business_pages.id"`、`"page_tags.id"`） |
+| L113-L117 | `user_page_association = db.Table(...)` | 无（使用字符串 `"user.id"`、`"business_pages.id"`） |
+| L120-L173 | `class BusinessPage` | `page_group_association`、`page_tag_association` 变量（第 163、169 行引用） |
+
+`User` 在第 41 行执行时：
+```python
+authorized_pages = db.relationship(
+    "BusinessPage",
+    secondary=user_page_association,  # ❌ user_page_association 尚未定义
+    ...
+)
+```
+
+此处的 `secondary=` 参数接收的是**Python 变量对象**（非字符串），解释器会立即在当前作用域查找 `user_page_association`，但该变量要到第 113 行才被赋值，因此直接抛出 `NameError`。
+
+#### 2. `secondary=` 参数的两种引用方式
+
+SQLAlchemy 的 `db.relationship()` 中 `secondary` 参数支持两种引用方式：
+
+| 引用方式 | 示例 | 定义顺序要求 |
+|---------|------|--------------|
+| **变量对象** | `secondary=user_page_association` | 关联表变量必须在当前语句执行前定义 |
+| **表名字符串** | `secondary="user_page_association"` | 表在 mapper 阶段存在即可，不要求变量提前定义 |
+
+本项目中所有关联关系均使用**变量对象**方式（更直观、IDE 支持更好），因此必须确保关联表变量在引用它的模型之前定义。
+
+#### 3. 关联表的 `ForeignKey` 使用字符串引用
+
+关联表定义中使用的是字符串形式的表名引用：
+```python
+db.Column("user_id", db.Integer, db.ForeignKey("user.id"), ...)
+db.Column("page_id", db.Integer, db.ForeignKey("business_pages.id"), ...)
+```
+
+这些字符串会在 SQLAlchemy mapper 配置阶段解析，**不要求 `User` 或 `BusinessPage` 类提前定义**，只要最终表存在即可。
+
+---
+
+### 修复方案
+
+#### 一、核心修复：调整定义顺序
+
+**文件**：[models.py](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/app/models.py)
+
+按照以下原则重新组织所有模型和关联表的定义顺序：
+
+**依赖原则**：被引用的对象必须在引用它的对象之前定义。
+
+#### 修正后的完整定义顺序
+
+```
+1. 导入和辅助函数（beijing_now）
+2. Admin                      独立模型，无前置依赖
+3. DbConfig                   独立模型
+4. SystemSetting              独立模型
+5. LoginAudit                 独立模型
+6. Notification               独立模型
+7. PageGroup                  分组模型，将被关联表引用
+8. PageTag                    标签模型，将被关联表引用
+9. page_group_association     关联表，引用表名字符串
+10. page_tag_association      关联表，引用表名字符串
+11. user_page_association     ← 移到这里，在 User 之前定义
+12. User                       ← 现在 user_page_association 已定义 ✅
+13. BusinessPage               所有关联表变量已定义 ✅
+14. PageVisit                  独立模型
+```
+
+#### 关键说明
+
+1. **关联表（`db.Table`）使用字符串引用表名**：
+   ```python
+   db.Column("user_id", db.Integer, db.ForeignKey("user.id"), primary_key=True)
+   db.Column("page_id", db.Integer, db.ForeignKey("business_pages.id"), primary_key=True)
+   ```
+   这里 `"user.id"` 和 `"business_pages.id"` 都是字符串，SQLAlchemy 会在 mapper 阶段解析，因此不要求 `User` 或 `BusinessPage` 类先定义。
+
+2. **`User` 的 `relationship` 使用变量对象引用关联表**：
+   ```python
+   authorized_pages = db.relationship(
+       "BusinessPage",
+       secondary=user_page_association,  # ✅ 变量已在第 113 行定义
+       ...
+   )
+   ```
+   `secondary=` 参数直接使用 Python 变量 `user_page_association`，因此该变量必须在此语句之前定义。
+
+3. **`BusinessPage` 的所有关系也已满足顺序要求**：
+   - `groups` 关系引用 `page_group_association`（第 101 行已定义）
+   - `tags` 关系引用 `page_tag_association`（第 107 行已定义）
+
+#### 二、验证测试脚本
+
+**新建文件**：[test_models_order.py](file:///D:/Desktop/新建文件夹%20(2)/label-3794/label-3794/backend/test_models_order.py)
+
+编写专门的测试脚本，验证：
+- 所有模型和关联表能否成功导入
+- User.authorized_pages 和 BusinessPage.groups/tags 关系是否存在
+- 关联表引用关系是否正确
+
+---
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `backend/app/models.py` | 重新组织所有模型和关联表的定义顺序，`user_page_association` 移到 `User` 模型之前 |
+| `backend/test_models_order.py` | **新增**：模型定义顺序验证测试脚本 |
+
+---
+
+### 验证方法
+
+#### 验证 1：语法层面验证
+```bash
+cd backend
+python -m py_compile app/models.py
+```
+无任何输出表示语法正确。
+
+#### 验证 2：导入验证（最关键）
+```bash
+cd backend
+docker compose exec backend python -c "from app.models import User, BusinessPage, user_page_association, page_group_association, page_tag_association; print('所有模型和关联表导入成功')"
+```
+应输出 `所有模型和关联表导入成功`，无 `NameError`。
+
+#### 验证 3：应用启动验证
+```bash
+docker compose up -d --build backend
+docker compose logs backend --tail 30
+```
+- 不应出现 `NameError: name 'user_page_association' is not defined` 错误
+- 应用应正常启动，看到 `Starting gunicorn` 和 `Booting worker` 日志
+
+#### 验证 4：API 功能验证
+1. 测试用户登录接口：
+   ```bash
+   curl -X POST http://localhost:3000/api/user/login \
+     -H "Content-Type: application/json" \
+     -d '{"username":"demo","password":"123456","captcha_id":"xxx","captcha_code":"xxxx"}'
+   ```
+   应返回正常响应（验证码错误或登录成功），无 500 错误。
+
+2. 测试用户授权页面列表：
+   登录成功后访问 `GET /api/user/authorized-pages`，应返回已授权页面列表。
+
+3. 测试管理员页面授权：
+   进入管理员后台 → 用户管理 → 点击"授权页面"按钮，弹窗应正常显示所有页面。
+
+---
+
+### 修复前后对比
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| 导入模型 | `NameError: name 'user_page_association' is not defined` | ✅ 导入成功 |
+| 应用启动 | 进程崩溃，容器退出 | ✅ 正常启动，gunicorn worker 正常 boot |
+| 用户登录接口 | 500 错误 | ✅ 正常返回 |
+| 个人工作台 | 无法访问 | ✅ 正常加载授权页面 |
+| 管理员页面授权 | 弹窗加载失败 | ✅ 正常显示页面列表 |
+
+---
+
+### 预防措施
+
+1. **多对多关联表定义规范**：在定义包含 `relationship(secondary=...)` 的模型前，务必先定义其引用的关联表 `db.Table` 对象
+2. **代码审查检查清单**：新增多对多关系时，检查 `secondary=` 参数：
+   - 如果是**变量对象** → 确保该 `db.Table` 在当前类上方定义
+   - 如果是**字符串** → 确保目标表的 `__tablename__` 正确
+3. **推荐结构**：将所有独立模型按字母顺序或业务分组放在前面，将所有 `db.Table` 关联表集中放在独立模型之后、使用它们的模型之前
+4. **新增模型时的检查流程**：
+   1. 定义模型类（包含关系）
+   2. 检查所有 `secondary=` 引用的变量是否已在上方定义
+   3. 运行 `python -c "from app.models import Xxx"` 验证导入
+   4. 重启应用确认无 `NameError`
+5. **关联表命名规范**：所有多对多关联表统一命名为 `{model1}_{model2}_association`，便于搜索和识别
+
+---
+
+### 相关历史修复
+
+此问题与「六、models.py 关联表定义顺序不当导致模型加载失败」属于同一类问题。本次修复是针对新增的 `User-BusinessPage` 关联关系进行的同类调整。两次修复共同确保了：
+- `BusinessPage` 引用的 `page_group_association`、`page_tag_association` → 在 BusinessPage 之前定义
+- `User` 引用的 `user_page_association` → 在 User 之前定义
+- 所有关联表使用字符串引用表名，不依赖模型类的定义顺序

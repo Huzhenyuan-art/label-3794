@@ -24,26 +24,6 @@ class Admin(db.Model):
     updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
 
 
-class User(db.Model):
-    __tablename__ = "user"
-
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(64), nullable=False, unique=True, index=True)
-    password_hash = db.Column(db.String(255), nullable=False)
-    display_name = db.Column(db.String(64), nullable=True)
-    status = db.Column(db.String(16), nullable=False, default="active")
-    last_login_at = db.Column(db.DateTime, nullable=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=beijing_now)
-    updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
-
-    authorized_pages = db.relationship(
-        "BusinessPage",
-        secondary=user_page_association,
-        lazy="selectin",
-        backref=db.backref("authorized_users", lazy="selectin"),
-    )
-
-
 class DbConfig(db.Model):
     __tablename__ = "db_config"
 
@@ -130,12 +110,31 @@ page_tag_association = db.Table(
     db.Column("tag_id", db.Integer, db.ForeignKey("page_tags.id"), primary_key=True),
 )
 
-
 user_page_association = db.Table(
     "user_page_association",
     db.Column("user_id", db.Integer, db.ForeignKey("user.id"), primary_key=True),
     db.Column("page_id", db.Integer, db.ForeignKey("business_pages.id"), primary_key=True),
 )
+
+
+class User(db.Model):
+    __tablename__ = "user"
+
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    password_hash = db.Column(db.String(255), nullable=False)
+    display_name = db.Column(db.String(64), nullable=True)
+    status = db.Column(db.String(16), nullable=False, default="active")
+    last_login_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=beijing_now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
+
+    authorized_pages = db.relationship(
+        "BusinessPage",
+        secondary=user_page_association,
+        lazy="selectin",
+        backref=db.backref("authorized_users", lazy="selectin"),
+    )
 
 
 class BusinessPage(db.Model):
