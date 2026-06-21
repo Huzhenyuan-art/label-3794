@@ -37,30 +37,6 @@ class User(db.Model):
     updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
 
 
-class BusinessPage(db.Model):
-    __tablename__ = "business_pages"
-
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), nullable=False, index=True)
-    description = db.Column(db.Text, nullable=False)
-    category = db.Column(db.String(64), nullable=False, index=True)
-    developer = db.Column(db.String(64), nullable=False)
-    main_page = db.Column(db.String(255), nullable=False)
-    storage_folder = db.Column(db.String(255), nullable=False)
-    route_path = db.Column(db.String(255), nullable=False, unique=True)
-    table_prefix = db.Column(db.String(40), nullable=False, unique=True)
-    table_name = db.Column(db.String(80), nullable=False, unique=True)
-    api_token_hash = db.Column(db.String(64), nullable=False)
-    status = db.Column(db.String(16), nullable=False, default="enabled", index=True)
-    uploader_admin_id = db.Column(db.Integer, db.ForeignKey("admin.id"), nullable=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=beijing_now, index=True)
-    updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
-
-    uploader = db.relationship("Admin", lazy=True)
-    groups = db.relationship("PageGroup", secondary=page_group_association, lazy="subquery")
-    tags = db.relationship("PageTag", secondary=page_tag_association, lazy="subquery")
-
-
 class DbConfig(db.Model):
     __tablename__ = "db_config"
 
@@ -146,3 +122,27 @@ page_tag_association = db.Table(
     db.Column("page_id", db.Integer, db.ForeignKey("business_pages.id"), primary_key=True),
     db.Column("tag_id", db.Integer, db.ForeignKey("page_tags.id"), primary_key=True),
 )
+
+
+class BusinessPage(db.Model):
+    __tablename__ = "business_pages"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, index=True)
+    description = db.Column(db.Text, nullable=False)
+    category = db.Column(db.String(64), nullable=False, index=True)
+    developer = db.Column(db.String(64), nullable=False)
+    main_page = db.Column(db.String(255), nullable=False)
+    storage_folder = db.Column(db.String(255), nullable=False)
+    route_path = db.Column(db.String(255), nullable=False, unique=True)
+    table_prefix = db.Column(db.String(40), nullable=False, unique=True)
+    table_name = db.Column(db.String(80), nullable=False, unique=True)
+    api_token_hash = db.Column(db.String(64), nullable=False)
+    status = db.Column(db.String(16), nullable=False, default="enabled", index=True)
+    uploader_admin_id = db.Column(db.Integer, db.ForeignKey("admin.id"), nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=beijing_now, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=beijing_now, onupdate=beijing_now)
+
+    uploader = db.relationship("Admin", lazy=True)
+    groups = db.relationship("PageGroup", secondary=page_group_association, lazy="subquery")
+    tags = db.relationship("PageTag", secondary=page_tag_association, lazy="subquery")

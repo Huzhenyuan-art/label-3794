@@ -784,3 +784,130 @@ npm install -D typescript
 
 - 在 `.eslintrc` 中启用 `no-restricted-syntax` 规则，禁止在 `.js` / `.jsx` 中使用 TS 类型注解语法
 - 如果团队需要类型系统，建议统一迁移至 TypeScript，避免混用
+
+---
+
+## 六、models.py 关联表定义顺序不当导致模型加载失败
+
+### 问题现象
+
+在开发「业务页面分组与多标签管理模块」时，由于 `BusinessPage` 模型中通过 `db.relationship()` 引用了关联表对象 `page_group_association` 和 `page_tag_association`，但这两个关联表在文件中的定义位置**晚于** `BusinessPage` 类，导致 Python 解释器在执行 `BusinessPage` 类体时，尝试访问尚未定义的变量，抛出 `NameError` 异常，应用无法启动。
+
+### 根因分析
+
+Python 是**顺序解释执行**的语言，类定义体中的代码会在类被声明时立即执行。
+
+原文件中的定义顺序为：
+
+| 位置 | 定义内容 | 依赖 |
+|------|---------|------|
+| L40-L61 | `class BusinessPage` | `page_group_association`、`page_tag_association`（第 60-61 行引用） |
+| L115-L124 | `class PageGroup` | 无 |
+| L127-L135 | `class PageTag` | 无 |
+| L138-L142 | `page_group_association = db.Table(...)` | 无 |
+| L144-L148 | `page_tag_association = db.Table(...)` | 无 |
+
+`BusinessPage` 在第 60-61 行执行时：
+
+```python
+groups = db.relationship("PageGroup", secondary=page_group_association, lazy="subquery")
+tags = db.relationship("PageTag", secondary=page_tag_association, lazy="subquery")
+```
+
+此处的 `secondary` 参数接收的是**Python 变量对象**（非字符串），解释器会立即在当前作用域查找 `page_group_association` 和 `page_tag_association`，但这两个变量要到第 138 行和第 144 行才被赋值，因此直接抛出：
+
+```
+NameError: name 'page_group_association' is not defined
+```
+
+> 注意：`db.relationship()` 的第一个参数 `"PageGroup"` 是字符串形式的惰性引用，SQLAlchemy 会在 mapper 配置阶段解析，不要求目标类提前定义；但 `secondary=` 参数如果传入变量对象，就必须在当前语句执行前已定义。
+
+### 修复方案
+
+将整个 `models.py` 中的模型和关联表按照以下原则重新排序：
+
+**依赖原则：被引用的对象必须在引用它的对象之前定义。**
+
+具体调整如下：
+
+#### 正确的定义顺序
+
+```
+1. Admin                 ← 独立模型，无前置依赖
+2. User                  ← 独立模型
+3. DbConfig              ← 独立模型
+4. SystemSetting         ← 独立模型
+5. LoginAudit            ← 独立模型
+6. Notification          ← 依赖 Admin（字符串形式，可在后面，但此处按模块分组）
+7. PageGroup             ← 分组模型，将被关联表引用
+8. PageTag               ← 标签模型，将被关联表引用
+9. page_group_association ← 关联表，引用 business_pages 和 page_groups 表名字符串
+10. page_tag_association  ← 关联表，引用 business_pages 和 page_tags 表名字符串
+11. BusinessPage          ← 依赖 page_group_association 和 page_tag_association 变量对象，放在最后
+```
+
+#### 关键说明
+
+1. **关联表（`db.Table`）使用字符串引用表名**：
+
+   ```python
+   db.Column("page_id", db.Integer, db.ForeignKey("business_pages.id"), ...)
+   db.Column("group_id", db.Integer, db.ForeignKey("page_groups.id"), ...)
+   ```
+   
+   这里 `"business_pages.id"` 和 `"page_groups.id"` 都是字符串，SQLAlchemy 会在 mapper 阶段解析，因此不要求 `BusinessPage` 或 `PageGroup` 类先定义，只要最终表存在即可。
+
+2. **`BusinessPage` 的 `relationship` 使用变量对象引用关联表**：
+
+   ```python
+   groups = db.relationship("PageGroup", secondary=page_group_association, ...)
+   ```
+
+   `secondary=` 参数直接使用 Python 变量 `page_group_association`，因此该变量必须在此语句之前定义。这也是本次修复的核心调整点。
+
+3. **也可用字符串形式避免顺序问题（备选方案）**：
+
+   如果不想调整定义顺序，也可以将 `secondary` 改为表名字符串：
+
+   ```python
+   groups = db.relationship("PageGroup", secondary="page_group_association", ...)
+   tags = db.relationship("PageTag", secondary="page_tag_association", ...)
+   ```
+
+   SQLAlchemy 会根据字符串 `"page_group_association"` 在注册表中查找对应的 Table 对象。但此方案要求开发者清楚记住哪些参数支持字符串惰性引用，可读性稍差。本次修复采用**调整定义顺序**的方案，更符合代码从上到下的阅读习惯。
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `backend/app/models.py` | 重新组织所有模型和关联表的定义顺序，`BusinessPage` 移到文件末尾，确保其引用的 `page_group_association` 和 `page_tag_association` 已提前定义 |
+
+### 验证方法
+
+1. **语法层面验证**：
+   ```bash
+   cd backend
+   python -m py_compile app/models.py
+   ```
+   无任何输出表示语法正确。
+
+2. **导入验证**：
+   ```bash
+   cd backend
+   python -c "from app.models import BusinessPage, PageGroup, PageTag, page_group_association, page_tag_association; print('OK')"
+   ```
+   应输出 `OK`，无 `NameError`。
+
+3. **应用启动验证**：
+   启动 Flask 应用，访问 `/health` 端点应返回正常，日志中无任何模型加载相关的异常。
+
+4. **关联查询验证**：
+   在数据库中创建测试数据后，查询 `BusinessPage.query.first().groups` 和 `BusinessPage.query.first().tags` 应返回对应对象列表，而不是抛出 `InvalidRequestError`。
+
+### 预防措施
+
+1. **多对多关联表定义规范**：在定义包含 `relationship(secondary=...)` 的模型前，务必先定义其引用的关联表 `db.Table` 对象。
+2. **代码审查清单**：新增多对多关系时，检查 `secondary=` 参数：
+   - 如果是**变量对象** → 确保该 `db.Table` 在当前类上方定义
+   - 如果是**字符串** → 确保目标表的 `__tablename__` 正确，且最终会被 SQLAlchemy 注册
+3. **推荐结构**：将所有独立模型按字母顺序或业务分组放在前面，将所有 `db.Table` 关联表集中放在独立模型之后、使用它们的模型之前。
