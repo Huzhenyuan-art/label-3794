@@ -157,3 +157,17 @@ class BusinessPage(db.Model):
         lazy="selectin",
         backref=db.backref("pages", lazy="selectin"),
     )
+
+
+class PageVisit(db.Model):
+    __tablename__ = "page_visits"
+
+    id = db.Column(db.Integer, primary_key=True)
+    page_id = db.Column(db.Integer, db.ForeignKey("business_pages.id"), nullable=False, index=True)
+    visitor_id = db.Column(db.String(64), nullable=False, index=True)
+    referrer = db.Column(db.String(500), nullable=True)
+    ip_address = db.Column(db.String(64), nullable=True)
+    user_agent = db.Column(db.String(500), nullable=True)
+    visited_at = db.Column(db.DateTime, nullable=False, default=beijing_now, index=True)
+
+    page = db.relationship("BusinessPage", lazy=True)

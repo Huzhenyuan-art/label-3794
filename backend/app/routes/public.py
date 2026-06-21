@@ -1,9 +1,12 @@
+import hashlib
+import logging
+
 from flask import Blueprint, jsonify, request
 from sqlalchemy import or_
 from sqlalchemy.orm import selectinload
 
 from ..extensions import db
-from ..models import BusinessPage, PageGroup, PageTag
+from ..models import BusinessPage, PageGroup, PageTag, PageVisit
 from ..utils import (
     json_success,
     safe_getattr,
@@ -14,6 +17,8 @@ from ..utils import (
     serialize_tags_collection,
     to_iso,
 )
+
+logger = logging.getLogger(__name__)
 
 
 bp = Blueprint("public", __name__, url_prefix="/api/public")
@@ -125,3 +130,48 @@ def list_public_tags():
                 }
             )
     return jsonify(json_success(result))
+
+
+def _get_visitor_id() -> str:
+    ip = request.remote_addr or "unknown"
+    user_agent = request.headers.get("User-Agent", "")
+    raw = f"{ip}|{user_agent}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+@bp.post("/page-visit")
+def record_page_visit():
+    try:
+        data = request.get_json(silent=True) or {}
+        page_id = data.get("page_id")
+        referrer = data.get("referrer") or request.headers.get("Referer")
+
+        if not page_id:
+            return jsonify(json_success(None, "page_id 不能为空")), 400
+
+        page = BusinessPage.query.get(page_id)
+        if not page or page.status != "enabled":
+            return jsonify(json_success(None, "页面不存在或已禁用")), 404
+
+        visitor_id = _get_visitor_id()
+        ip_address = request.remote_addr
+        user_agent = request.headers.get("User-Agent", "")[:500]
+
+        if referrer and len(referrer) > 500:
+            referrer = referrer[:500]
+
+        visit = PageVisit(
+            page_id=page_id,
+            visitor_id=visitor_id,
+            referrer=referrer,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        db.session.add(visit)
+        db.session.commit()
+
+        return jsonify(json_success({"visit_id": visit.id}, "访问记录成功"))
+    except Exception as exc:
+        logger.warning("记录页面访问失败: %s", exc)
+        db.session.rollback()
+        return jsonify(json_success(None, "记录失败")), 500

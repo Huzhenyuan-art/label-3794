@@ -113,6 +113,22 @@ function HomePage() {
     return items;
   }, [groups]);
 
+  const recordPageVisit = async (pageId) => {
+    try {
+      await http.post('/api/public/page-visit', {
+        page_id: pageId,
+        referrer: document.referrer,
+      });
+    } catch (error) {
+      // 埋点失败不影响用户体验
+    }
+  };
+
+  const handlePageEnter = (page) => {
+    recordPageVisit(page.id);
+    window.open(page.route_path, '_blank');
+  };
+
   const toggleTag = (tagId) => {
     setSelectedTagIds((prev) =>
       prev.includes(tagId) ? prev.filter((id) => id !== tagId) : [...prev, tagId]
@@ -287,8 +303,7 @@ function HomePage() {
                   <Button
                     type="primary"
                     block
-                    href={page.route_path}
-                    target="_blank"
+                    onClick={() => handlePageEnter(page)}
                     className="card-enter-btn"
                   >
                     访问入口

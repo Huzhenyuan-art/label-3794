@@ -7,6 +7,7 @@ import http, { extractErrorMessage } from '../services/http';
 import BusinessPagesPanel from './admin/BusinessPagesPanel';
 import GroupsPanel from './admin/GroupsPanel';
 import SettingsPanel from './admin/SettingsPanel';
+import StatsPanel from './admin/StatsPanel';
 import TagsPanel from './admin/TagsPanel';
 import UsersPanel from './admin/UsersPanel';
 
@@ -14,6 +15,7 @@ const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
 
 const menuItems = [
+  { key: 'stats', label: '访问统计' },
   { key: 'pages', label: '业务页面管理' },
   { key: 'groups', label: '分组管理' },
   { key: 'tags', label: '标签管理' },
@@ -28,6 +30,9 @@ function AdminDashboardPage() {
   const [admin, setAdmin] = useState(null);
 
   const panel = useMemo(() => {
+    if (selectedKey === 'stats') {
+      return <StatsPanel />;
+    }
     if (selectedKey === 'groups') {
       return <GroupsPanel />;
     }
