@@ -86,6 +86,11 @@ def create_app() -> Flask:
     def serve_uploaded_pages(asset_path: str):
         return send_from_directory(app.config["UPLOAD_ROOT"], asset_path)
 
+    @app.get("/static/qrcodes/<path:filename>")
+    def serve_qrcodes(filename: str):
+        qrcode_dir = os.path.join(os.path.dirname(app.config["UPLOAD_ROOT"]), "qrcodes")
+        return send_from_directory(qrcode_dir, filename)
+
     @app.after_request
     def add_security_headers(response):
         response.headers["X-Content-Type-Options"] = "nosniff"

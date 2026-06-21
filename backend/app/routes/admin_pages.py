@@ -2,8 +2,9 @@ import logging
 import os
 import secrets
 import time
+from urllib.parse import urljoin
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, request, send_file
 from flask_jwt_extended import get_jwt
 from sqlalchemy import text
 from sqlalchemy.orm import selectinload
@@ -15,6 +16,12 @@ from ..schemas import PageCreatePayload, PageGroupTagBindPayload, PageUpdatePayl
 from ..security import admin_required, generate_api_token, hash_token
 from ..services.dynamic_table_service import drop_dynamic_table, ensure_dynamic_table
 from ..services.notification_service import NOTIFICATION_TYPES, create_notification
+from ..services.qrcode_service import (
+    delete_qrcode,
+    generate_qrcode_image,
+    get_qrcode_image_bytes,
+    get_qrcode_url,
+)
 from ..services.storage_service import delete_assets, store_uploaded_assets
 from ..utils import (
     json_success,
@@ -32,6 +39,11 @@ bp = Blueprint("admin_pages", __name__, url_prefix="/api/admin/pages")
 logger = logging.getLogger(__name__)
 
 
+def _build_share_url(page: BusinessPage) -> str:
+    base_url = request.host_url.rstrip("/")
+    return urljoin(base_url, page.route_path)
+
+
 def _serialize_page(page: BusinessPage) -> dict:
     try:
         groups = serialize_groups_collection(safe_getattr(page, "groups", []))
@@ -40,6 +52,10 @@ def _serialize_page(page: BusinessPage) -> dict:
         logger.warning("序列化页面关联数据失败，降级为空列表：%s", exc)
         groups = []
         tags = []
+
+    qrcode_filename = safe_getattr(page, "qrcode_filename")
+    qrcode_url = get_qrcode_url(qrcode_filename) if qrcode_filename else None
+    share_url = _build_share_url(page) if safe_getattr(page, "route_path") else None
 
     return {
         "id": safe_getattr(page, "id"),
@@ -58,6 +74,9 @@ def _serialize_page(page: BusinessPage) -> dict:
         "updated_at": to_iso(safe_getattr(page, "updated_at")),
         "groups": groups,
         "tags": tags,
+        "qrcode_url": qrcode_url,
+        "qrcode_filename": qrcode_filename,
+        "share_url": share_url,
     }
 
 
@@ -203,6 +222,16 @@ def create_page():
         db.session.commit()
         ensure_dynamic_table(table_name)
 
+        try:
+            share_url = _build_share_url(page)
+            qrcode_fn = f"page_{page.id}_{int(time.time())}"
+            generate_qrcode_image(share_url, qrcode_fn)
+            page.qrcode_filename = qrcode_fn
+            db.session.commit()
+        except Exception as qr_err:
+            logger.warning("生成二维码失败: %s", qr_err)
+            db.session.rollback()
+
         # 执行可选的初始化 SQL
         if init_sql:
             try:
@@ -250,6 +279,19 @@ def update_page(page_id: int):
             setattr(page, field, value)
 
     db.session.commit()
+
+    try:
+        if page.qrcode_filename:
+            delete_qrcode(page.qrcode_filename)
+        share_url = _build_share_url(page)
+        qrcode_fn = f"page_{page.id}_{int(time.time())}"
+        generate_qrcode_image(share_url, qrcode_fn)
+        page.qrcode_filename = qrcode_fn
+        db.session.commit()
+    except Exception as qr_err:
+        logger.warning("更新二维码失败: %s", qr_err)
+        db.session.rollback()
+
     return jsonify(json_success(_serialize_page(page), "页面更新成功"))
 
 
@@ -294,11 +336,17 @@ def delete_page(page_id: int):
 
     storage_folder = page.storage_folder
     table_name = page.table_name
+    qrcode_filename = page.qrcode_filename
 
     db.session.delete(page)
     db.session.commit()
 
     delete_assets(current_app.config["UPLOAD_ROOT"], storage_folder)
+    if qrcode_filename:
+        try:
+            delete_qrcode(qrcode_filename)
+        except Exception:
+            pass
     try:
         drop_dynamic_table(table_name)
     except Exception:
@@ -327,3 +375,83 @@ def bind_page_groups_tags(page_id: int):
     page.tags = tags
     db.session.commit()
     return jsonify(json_success(_serialize_page(page), "分组与标签绑定成功"))
+
+
+@bp.get("/<int:page_id>/qrcode")
+@admin_required()
+def get_page_qrcode(page_id: int):
+    page = BusinessPage.query.get(page_id)
+    if not page:
+        raise ApiError(404, "业务页面不存在")
+
+    if not page.qrcode_filename:
+        try:
+            share_url = _build_share_url(page)
+            qrcode_fn = f"page_{page.id}_{int(time.time())}"
+            generate_qrcode_image(share_url, qrcode_fn)
+            page.qrcode_filename = qrcode_fn
+            db.session.commit()
+        except Exception as qr_err:
+            logger.warning("生成二维码失败: %s", qr_err)
+            raise ApiError(500, "二维码生成失败")
+
+    import io as _io
+    qrcode_dir = os.path.join(os.path.dirname(current_app.config["UPLOAD_ROOT"]), "qrcodes")
+    filename = page.qrcode_filename if page.qrcode_filename.endswith(".png") else f"{page.qrcode_filename}.png"
+    file_path = os.path.join(qrcode_dir, filename)
+    if not os.path.exists(file_path):
+        try:
+            share_url = _build_share_url(page)
+            image_bytes = get_qrcode_image_bytes(share_url)
+            return send_file(
+                _io.BytesIO(image_bytes),
+                mimetype="image/png",
+                as_attachment=True,
+                download_name=f"{page.name}_qrcode.png",
+            )
+        except Exception:
+            raise ApiError(404, "二维码图片不存在")
+
+    return send_file(
+        file_path,
+        mimetype="image/png",
+        as_attachment=True,
+        download_name=f"{page.name}_qrcode.png",
+    )
+
+
+@bp.post("/<int:page_id>/qrcode/refresh")
+@admin_required(require_csrf=True)
+def refresh_page_qrcode(page_id: int):
+    page = BusinessPage.query.get(page_id)
+    if not page:
+        raise ApiError(404, "业务页面不存在")
+
+    try:
+        if page.qrcode_filename:
+            delete_qrcode(page.qrcode_filename)
+        share_url = _build_share_url(page)
+        qrcode_fn = f"page_{page.id}_{int(time.time())}"
+        generate_qrcode_image(share_url, qrcode_fn)
+        page.qrcode_filename = qrcode_fn
+        db.session.commit()
+    except Exception as qr_err:
+        logger.warning("刷新二维码失败: %s", qr_err)
+        db.session.rollback()
+        raise ApiError(500, "二维码刷新失败")
+
+    return jsonify(json_success(_serialize_page(page), "二维码已刷新"))
+
+
+@bp.get("/<int:page_id>/share-url")
+@admin_required()
+def get_page_share_url(page_id: int):
+    page = BusinessPage.query.get(page_id)
+    if not page:
+        raise ApiError(404, "业务页面不存在")
+
+    share_url = _build_share_url(page)
+    return jsonify(json_success({
+        "share_url": share_url,
+        "qrcode_url": get_qrcode_url(page.qrcode_filename) if page.qrcode_filename else None,
+    }))

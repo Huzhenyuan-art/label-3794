@@ -3,6 +3,7 @@ import {
   Card,
   Checkbox,
   Form,
+  Image,
   Input,
   Modal,
   Popconfirm,
@@ -10,9 +11,11 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Upload,
   message,
 } from 'antd';
+import { CopyOutlined, DownloadOutlined, QrcodeOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import http, { extractErrorMessage } from '../../services/http';
 import { formatDate } from '../../utils/date';
@@ -28,8 +31,10 @@ function BusinessPagesPanel() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [bindOpen, setBindOpen] = useState(false);
+  const [qrcodeOpen, setQrcodeOpen] = useState(false);
   const [editingPage, setEditingPage] = useState(null);
   const [bindingPage, setBindingPage] = useState(null);
+  const [qrcodePage, setQrcodePage] = useState(null);
   const [uploadFile, setUploadFile] = useState(null);
 
   const [createForm] = Form.useForm();
@@ -208,6 +213,57 @@ function BusinessPagesPanel() {
     }
   };
 
+  const openQrcode = (page) => {
+    setQrcodePage(page);
+    setQrcodeOpen(true);
+  };
+
+  const copyShareUrl = async (page) => {
+    try {
+      let shareUrl = page.share_url;
+      if (!shareUrl) {
+        const { data } = await http.get(`/api/admin/pages/${page.id}/share-url`);
+        shareUrl = data.data.share_url;
+      }
+      await navigator.clipboard.writeText(shareUrl);
+      message.success('分享链接已复制到剪贴板');
+    } catch (error) {
+      message.error(extractErrorMessage(error));
+    }
+  };
+
+  const downloadQrcode = async (page) => {
+    try {
+      const response = await http.get(`/api/admin/pages/${page.id}/qrcode`, {
+        responseType: 'blob',
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `${page.name}_qrcode.png`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      message.success('二维码下载成功');
+    } catch (error) {
+      message.error(extractErrorMessage(error));
+    }
+  };
+
+  const refreshQrcode = async (page) => {
+    try {
+      const { data } = await http.post(`/api/admin/pages/${page.id}/qrcode/refresh`);
+      setPages((prev) => prev.map((p) => (p.id === page.id ? data.data : p)));
+      if (qrcodePage && qrcodePage.id === page.id) {
+        setQrcodePage(data.data);
+      }
+      message.success('二维码已刷新');
+    } catch (error) {
+      message.error(extractErrorMessage(error));
+    }
+  };
+
   const columns = [
     {
       title: '功能名称',
@@ -260,6 +316,71 @@ function BusinessPagesPanel() {
         ),
     },
     {
+      title: '访问二维码',
+      dataIndex: 'qrcode_url',
+      width: 140,
+      render: (value, record) => (
+        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+          {value ? (
+            <Image
+              src={value}
+              alt={`${record.name} 二维码`}
+              width={80}
+              height={80}
+              style={{ cursor: 'pointer', border: '1px solid #f0f0f0', borderRadius: 4 }}
+              preview={false}
+              onClick={() => openQrcode(record)}
+            />
+          ) : (
+            <div
+              style={{
+                width: 80,
+                height: 80,
+                border: '1px dashed #d9d9d9',
+                borderRadius: 4,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#bfbfbf',
+                fontSize: 12,
+              }}
+            >
+              暂无
+            </div>
+          )}
+          <Space size={4}>
+            <Tooltip title="下载二维码">
+              <Button
+                type="link"
+                size="small"
+                icon={<DownloadOutlined />}
+                onClick={() => downloadQrcode(record)}
+                style={{ padding: 0 }}
+              />
+            </Tooltip>
+            <Tooltip title="复制分享链接">
+              <Button
+                type="link"
+                size="small"
+                icon={<CopyOutlined />}
+                onClick={() => copyShareUrl(record)}
+                style={{ padding: 0 }}
+              />
+            </Tooltip>
+            <Tooltip title="查看大图">
+              <Button
+                type="link"
+                size="small"
+                icon={<QrcodeOutlined />}
+                onClick={() => openQrcode(record)}
+                style={{ padding: 0 }}
+              />
+            </Tooltip>
+          </Space>
+        </Space>
+      ),
+    },
+    {
       title: '访问路由',
       dataIndex: 'route_path',
       width: 200,
@@ -286,7 +407,7 @@ function BusinessPagesPanel() {
     {
       title: '操作',
       key: 'actions',
-      width: 280,
+      width: 320,
       fixed: 'right',
       render: (_, record) => (
         <Space>
@@ -298,6 +419,9 @@ function BusinessPagesPanel() {
           </Button>
           <Button size="small" onClick={() => resetToken(record)}>
             重置Token
+          </Button>
+          <Button size="small" icon={<QrcodeOutlined />} onClick={() => openQrcode(record)}>
+            二维码
           </Button>
           <Popconfirm title="确认删除该页面？" onConfirm={() => deletePage(record)} okText="确认" cancelText="取消">
             <Button danger size="small">
@@ -318,7 +442,7 @@ function BusinessPagesPanel() {
         </Button>
       }
     >
-      <Table rowKey="id" loading={loading} columns={columns} dataSource={pages} scroll={{ x: 1600 }} />
+      <Table rowKey="id" loading={loading} columns={columns} dataSource={pages} scroll={{ x: 1900 }} />
 
       <Modal
         title="新增业务页面"
@@ -441,6 +565,91 @@ function BusinessPagesPanel() {
             </Checkbox.Group>
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title={qrcodePage ? `访问二维码 - ${qrcodePage.name}` : '访问二维码'}
+        open={qrcodeOpen}
+        onCancel={() => {
+          setQrcodeOpen(false);
+          setQrcodePage(null);
+        }}
+        footer={[
+          <Button
+            key="refresh"
+            icon={<ReloadOutlined />}
+            onClick={() => qrcodePage && refreshQrcode(qrcodePage)}
+          >
+            刷新二维码
+          </Button>,
+          <Button
+            key="copy"
+            icon={<CopyOutlined />}
+            onClick={() => qrcodePage && copyShareUrl(qrcodePage)}
+          >
+            复制分享链接
+          </Button>,
+          <Button
+            key="download"
+            type="primary"
+            icon={<DownloadOutlined />}
+            onClick={() => qrcodePage && downloadQrcode(qrcodePage)}
+          >
+            下载二维码
+          </Button>,
+        ]}
+        width={480}
+        destroyOnClose
+      >
+        {qrcodePage && (
+          <div style={{ textAlign: 'center', padding: '16px 0' }}>
+            {qrcodePage.qrcode_url ? (
+              <Image
+                src={qrcodePage.qrcode_url}
+                alt={`${qrcodePage.name} 访问二维码`}
+                width={260}
+                height={260}
+                style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: 8 }}
+                preview={false}
+              />
+            ) : (
+              <div
+                style={{
+                  width: 260,
+                  height: 260,
+                  border: '1px dashed #d9d9d9',
+                  borderRadius: 8,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: '#bfbfbf',
+                  margin: '0 auto',
+                }}
+              >
+                二维码生成中...
+              </div>
+            )}
+            <div style={{ marginTop: 20 }}>
+              <div style={{ color: '#666', fontSize: 13, marginBottom: 6 }}>分享链接：</div>
+              <Input
+                value={qrcodePage.share_url || qrcodePage.route_path}
+                readOnly
+                style={{ fontFamily: 'monospace', fontSize: 12 }}
+                suffix={
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<CopyOutlined />}
+                    onClick={() => copyShareUrl(qrcodePage)}
+                  />
+                }
+              />
+            </div>
+            <div style={{ marginTop: 12, color: '#999', fontSize: 12 }}>
+              扫描二维码或复制链接即可访问该业务页面
+            </div>
+          </div>
+        )}
       </Modal>
     </Card>
   );

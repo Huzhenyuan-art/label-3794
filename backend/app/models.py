@@ -138,6 +138,7 @@ class BusinessPage(db.Model):
     table_prefix = db.Column(db.String(40), nullable=False, unique=True)
     table_name = db.Column(db.String(80), nullable=False, unique=True)
     api_token_hash = db.Column(db.String(64), nullable=False)
+    qrcode_filename = db.Column(db.String(255), nullable=True)
     status = db.Column(db.String(16), nullable=False, default="enabled", index=True)
     uploader_admin_id = db.Column(db.Integer, db.ForeignKey("admin.id"), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=beijing_now, index=True)
