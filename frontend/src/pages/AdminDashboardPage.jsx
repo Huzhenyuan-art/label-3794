@@ -1,6 +1,7 @@
 import { Button, Layout, Menu, Space, Spin, Typography, message } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import NotificationCenter from '../components/NotificationCenter';
 import { clearAuth, getAccessToken } from '../services/auth';
 import http, { extractErrorMessage } from '../services/http';
 import BusinessPagesPanel from './admin/BusinessPagesPanel';
@@ -82,8 +83,10 @@ function AdminDashboardPage() {
 
       <Layout>
         <Header className="dashboard-header">
-          <Space size="middle">
-            <Text>当前管理员：{admin?.username || '-'}</Text>
+          <div style={{ flex: 1 }} />
+          <Space size="middle" align="center">
+            <NotificationCenter />
+            <Text style={{ color: '#fff' }}>当前管理员：{admin?.username || '-'}</Text>
             <Button onClick={logout}>退出登录</Button>
           </Space>
         </Header>

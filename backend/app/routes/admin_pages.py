@@ -12,6 +12,7 @@ from ..models import BusinessPage, DbConfig, SystemSetting
 from ..schemas import PageCreatePayload, PageUpdatePayload
 from ..security import admin_required, generate_api_token, hash_token
 from ..services.dynamic_table_service import drop_dynamic_table, ensure_dynamic_table
+from ..services.notification_service import NOTIFICATION_TYPES, create_notification
 from ..services.storage_service import delete_assets, store_uploaded_assets
 from ..utils import json_success, to_iso
 
@@ -79,6 +80,8 @@ def list_pages():
 @bp.post("")
 @admin_required(require_csrf=True)
 def create_page():
+    claims = get_jwt()
+    admin_id = claims.get("admin_id")
     upload_file = request.files.get("file")
     if not upload_file:
         raise ApiError(400, "请上传页面文件")
@@ -118,41 +121,44 @@ def create_page():
     blocked_extensions = current_app.config["BLOCKED_EXTENSIONS"]
     upload_limit = (setting.upload_size_limit_mb if setting else current_app.config["MAX_UPLOAD_SIZE_MB"]) * 1024 * 1024
 
-    folder_name, storage_folder, route_path = store_uploaded_assets(
-        upload_file=upload_file,
-        upload_root=current_app.config["UPLOAD_ROOT"],
-        main_page=payload.main_page,
-        allowed_extensions=allowed_extensions,
-        allowed_mime_types=allowed_mime_types,
-        blocked_extensions=blocked_extensions,
-        max_size_bytes=upload_limit,
-    )
-
-    # 先生成一个临时前缀，待 page 录入后再用 page_id 更新
-    temp_prefix = _generate_table_prefix()
-    while BusinessPage.query.filter_by(table_prefix=temp_prefix).first():
-        temp_prefix = _generate_table_prefix()
-
-    table_name = f"{temp_prefix}_records"
-    api_token = generate_api_token()
-
-    claims = get_jwt()
-    page = BusinessPage(
-        name=payload.name,
-        description=payload.description,
-        category=payload.category,
-        developer=payload.developer,
-        main_page=payload.main_page,
-        storage_folder=storage_folder,
-        route_path=route_path,
-        table_prefix=temp_prefix,
-        table_name=table_name,
-        api_token_hash=hash_token(api_token),
-        status="enabled",
-        uploader_admin_id=claims.get("admin_id"),
-    )
-
+    storage_folder = None
+    folder_name = None
+    page = None
+    api_token = None
     try:
+        folder_name, storage_folder, route_path = store_uploaded_assets(
+            upload_file=upload_file,
+            upload_root=current_app.config["UPLOAD_ROOT"],
+            main_page=payload.main_page,
+            allowed_extensions=allowed_extensions,
+            allowed_mime_types=allowed_mime_types,
+            blocked_extensions=blocked_extensions,
+            max_size_bytes=upload_limit,
+        )
+
+        # 先生成一个临时前缀，待 page 录入后再用 page_id 更新
+        temp_prefix = _generate_table_prefix()
+        while BusinessPage.query.filter_by(table_prefix=temp_prefix).first():
+            temp_prefix = _generate_table_prefix()
+
+        table_name = f"{temp_prefix}_records"
+        api_token = generate_api_token()
+
+        page = BusinessPage(
+            name=payload.name,
+            description=payload.description,
+            category=payload.category,
+            developer=payload.developer,
+            main_page=payload.main_page,
+            storage_folder=storage_folder,
+            route_path=route_path,
+            table_prefix=temp_prefix,
+            table_name=table_name,
+            api_token_hash=hash_token(api_token),
+            status="enabled",
+            uploader_admin_id=admin_id,
+        )
+
         db.session.add(page)
         db.session.flush()  # 获取 page.id
 
@@ -186,9 +192,17 @@ def create_page():
                 response["sql_warning"] = f"初始化 SQL 执行失败: {str(sql_err)}"
                 return jsonify(json_success(response, "页面创建成功，但初始化 SQL 执行失败")), 201
 
-    except Exception:
+    except Exception as exc:
         db.session.rollback()
-        delete_assets(current_app.config["UPLOAD_ROOT"], storage_folder)
+        if storage_folder:
+            delete_assets(current_app.config["UPLOAD_ROOT"], storage_folder)
+        page_name = payload.name if payload else "未知"
+        create_notification(
+            notification_type=NOTIFICATION_TYPES["UPLOAD_FAILED"],
+            title="业务页面上传失败",
+            content=f"上传业务页面「{page_name}」时发生错误：{str(exc)}",
+            admin_id=admin_id,
+        )
         raise
 
     response = _serialize_page(page)

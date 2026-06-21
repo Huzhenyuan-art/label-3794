@@ -93,3 +93,18 @@ class LoginAudit(db.Model):
     success = db.Column(db.Boolean, nullable=False)
     reason = db.Column(db.String(255), nullable=True)
     attempted_at = db.Column(db.DateTime, nullable=False, default=beijing_now, index=True)
+
+
+class Notification(db.Model):
+    __tablename__ = "notifications"
+
+    id = db.Column(db.Integer, primary_key=True)
+    type = db.Column(db.String(32), nullable=False, index=True)
+    title = db.Column(db.String(120), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    is_read = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    admin_id = db.Column(db.Integer, db.ForeignKey("admin.id"), nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=beijing_now, index=True)
+    read_at = db.Column(db.DateTime, nullable=True)
+
+    admin = db.relationship("Admin", lazy=True)

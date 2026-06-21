@@ -8,6 +8,7 @@ from ..extensions import db
 from ..models import Admin, LoginAudit, beijing_now
 from ..schemas import LoginPayload
 from ..security import admin_required, generate_csrf_token, verify_password
+from ..services.notification_service import NOTIFICATION_TYPES, create_notification
 from ..utils import json_success, to_iso
 
 
@@ -42,6 +43,12 @@ def admin_login():
         if admin.failed_login_attempts >= current_app.config["MAX_LOGIN_ATTEMPTS"]:
             admin.locked_until = now + timedelta(minutes=current_app.config["LOGIN_LOCK_MINUTES"])
             reason = "连续登录失败，账号已临时锁定"
+            create_notification(
+                notification_type=NOTIFICATION_TYPES["ACCOUNT_LOCKED"],
+                title="管理员账号被锁定",
+                content=f"管理员账号「{admin.username}」因连续登录失败次数过多，已被临时锁定至 {to_iso(admin.locked_until)}。",
+                admin_id=admin.id,
+            )
 
         _record_login_audit(payload.username, False, reason, ip)
         db.session.commit()

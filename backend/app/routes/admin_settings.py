@@ -9,6 +9,7 @@ from ..extensions import db
 from ..models import Admin, DbConfig, SystemSetting
 from ..schemas import ChangePasswordPayload, DbConfigPayload, SqlExecPayload, SystemSettingPayload
 from ..security import admin_required, decrypt_text, encrypt_text, hash_password, verify_password
+from ..services.notification_service import NOTIFICATION_TYPES, create_notification
 from ..utils import json_success, to_iso
 
 
@@ -140,9 +141,22 @@ def change_admin_password():
 @admin_required(require_csrf=True)
 def execute_sql_query():
     payload = SqlExecPayload.model_validate(request.get_json(silent=True) or {})
-    result = db.session.execute(text(payload.sql)).mappings().all()
-    rows = [dict(row) for row in result][:200]
-    return jsonify(json_success({"rows": rows, "row_count": len(rows)}, "SQL 执行成功"))
+    claims = get_jwt()
+    admin_id = claims.get("admin_id")
+    try:
+        result = db.session.execute(text(payload.sql)).mappings().all()
+        rows = [dict(row) for row in result][:200]
+        return jsonify(json_success({"rows": rows, "row_count": len(rows)}, "SQL 执行成功"))
+    except Exception as exc:
+        db.session.rollback()
+        truncated_sql = payload.sql[:100] + "..." if len(payload.sql) > 100 else payload.sql
+        create_notification(
+            notification_type=NOTIFICATION_TYPES["SQL_ERROR"],
+            title="SQL 执行报错",
+            content=f"SQL 执行失败：{str(exc)}\nSQL 语句：{truncated_sql}",
+            admin_id=admin_id,
+        )
+        raise ApiError(400, f"SQL 执行失败: {str(exc)}")
 
 
 @bp.get("/db-password-preview")

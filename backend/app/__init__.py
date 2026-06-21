@@ -9,6 +9,7 @@ from .logging_config import setup_logging
 from .routes.admin_pages import bp as admin_pages_bp
 from .routes.admin_settings import bp as admin_settings_bp
 from .routes.admin_users import bp as admin_users_bp
+from .routes.admin_notifications import bp as admin_notifications_bp
 from .routes.auth import bp as auth_bp
 from .routes.data_api import bp as data_api_bp
 from .routes.public import bp as public_bp
@@ -32,6 +33,7 @@ def create_app() -> Flask:
     app.register_blueprint(admin_users_bp)
     app.register_blueprint(admin_pages_bp)
     app.register_blueprint(admin_settings_bp)
+    app.register_blueprint(admin_notifications_bp)
     app.register_blueprint(public_bp)
     app.register_blueprint(data_api_bp)
 
