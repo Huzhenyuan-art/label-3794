@@ -1,5 +1,5 @@
+import { AppstoreOutlined } from '@ant-design/icons';
 import {
-  AppstoreOutlined,
   Button,
   Card,
   Checkbox,

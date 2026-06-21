@@ -2774,4 +2774,122 @@ def _build_share_url(page: BusinessPage) -> str:
 4. **反向代理环境必须配置 ProxyFix**：Flask 应用在反向代理后必须启用 `ProxyFix` 中间件，否则 URL 生成会出错
 5. **外部可访问的 URL 必须可配置**：任何生成给外部用户访问的链接（分享链接、二维码、邮件链接等），必须通过环境变量可配置
 6. **文件存储必须持久化**：所有用户上传或系统生成的文件（页面、二维码、头像等），必须挂载到 Docker volume
-7. **代理头必须完整传递**：Nginx 反向代理必须传递 `X-Forwarded-For`、`X-Forwarded-Proto`、`X-Forwarded-Host` 三个核心头
+7.5. **代理头必须完整传递**：Nginx 反向代理必须传递 `X-Forwarded-For`、`X-Forwarded-Proto`、`X-Forwarded-Host` 三个核心头
+
+---
+
+## 十三、UsersPanel 组件构建失败：AppstoreOutlined 图标从 antd 主包错误导入
+
+### 问题现象
+
+构建前端项目时，`UsersPanel.jsx` 组件报错，提示 `AppstoreOutlined` 无法从 `antd` 包中导入，导致构建失败。
+
+典型错误信息类似：
+```
+WARNING in ./src/pages/admin/UsersPanel.jsx 2:2-18
+export 'AppstoreOutlined' (imported as 'AppstoreOutlined') was not found in 'antd'
+```
+
+### 根因分析
+
+Ant Design 的图标组件**不在 `antd` 主包中**，而是独立在 `@ant-design/icons` 包中。
+
+| 包名 | 包含内容 |
+|------|---------|
+| `antd` | 业务组件（Button、Card、Table 等） |
+| `@ant-design/icons` | 所有图标组件（AppstoreOutlined、UserOutlined 等） |
+
+在 `UsersPanel.jsx` 第 2 行，错误地将 `AppstoreOutlined` 和 `Button`、`Card` 等组件一起从 `'antd'` 导入：
+
+```javascript
+// ❌ 错误：AppstoreOutlined 不在 antd 包中
+import {
+  AppstoreOutlined,
+  Button,
+  Card,
+  // ...
+} from 'antd';
+```
+
+而项目中其他组件（如 `HomePage.jsx`、`UserDashboardPage.jsx`）都正确地从 `@ant-design/icons` 导入图标：
+
+```javascript
+// ✅ 正确：从 @ant-design/icons 导入图标
+import { AppstoreOutlined } from '@ant-design/icons';
+```
+
+这是一个**导入路径错误**，属于开发时的笔误，在使用 Vite 开发模式下可能由于缓存或按需加载机制未暴露，但在正式构建时会报错。
+
+### 修复方案
+
+将 `AppstoreOutlined` 的导入语句从 `antd` 包移动到 `@ant-design/icons` 包。
+
+**修改文件**：`frontend/src/pages/admin/UsersPanel.jsx`
+
+修改前：
+```javascript
+import {
+  AppstoreOutlined,
+  Button,
+  Card,
+  Checkbox,
+  // ...
+} from 'antd';
+```
+
+修改后：
+```javascript
+import { AppstoreOutlined } from '@ant-design/icons';
+import {
+  Button,
+  Card,
+  Checkbox,
+  // ...
+} from 'antd';
+```
+
+### 修改的文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `frontend/src/pages/admin/UsersPanel.jsx` | 将 `AppstoreOutlined` 从 `antd` 导入改为从 `@ant-design/icons` 导入 |
+
+### 验证方法
+
+1. **静态代码检查**：
+   ```bash
+   cd frontend
+   grep -n "from 'antd'" src/pages/admin/UsersPanel.jsx | grep -i "Outlined"
+   ```
+   应无任何输出，说明 antd 导入中不再包含图标组件。
+
+2. **图标导入正确性检查**：
+   ```bash
+   cd frontend
+   grep -n "from '@ant-design/icons'" src/pages/admin/UsersPanel.jsx
+   ```
+   应能看到 `AppstoreOutlined` 的导入。
+
+3. **构建验证**：
+   ```bash
+   cd frontend
+   npm install
+   npm run build
+   ```
+   构建应成功完成，无任何关于 `AppstoreOutlined` 的警告或错误。
+
+4. **运行验证**：
+   启动开发服务器，进入管理员后台的"用户管理"页面，点击任意用户的"授权页面"按钮，弹出的授权页面弹窗中应正常显示页面卡片和 `AppstoreOutlined` 图标。
+
+### 预防措施
+
+1. **导入分组规范**：所有 `*Outlined` / `*Filled` / `*TwoTone` 结尾的图标组件，**必须**从 `@ant-design/icons` 导入，禁止从 `antd` 主包导入
+2. **代码审查检查项**：新增 import 语句时必须检查：
+   - 图标类组件 → `@ant-design/icons`
+   - 业务 UI 组件 → `antd`
+3. **lint 规则**：建议配置 `eslint-plugin-import` 的 `import/no-restricted-paths` 规则，禁止从 `antd` 导入图标组件
+4. **批量扫描**：定期执行以下命令检查是否有类似问题：
+   ```bash
+   grep -rn "from 'antd'" src/ | grep -E "(Outlined|Filled|TwoTone)" | grep -v "//"
+   ```
+5. **统一导入风格**：参考项目中已有的组件（如 HomePage.jsx、AdminDashboardPage.jsx）的导入方式，保持一致
