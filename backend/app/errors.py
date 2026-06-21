@@ -6,10 +6,11 @@ from pydantic import ValidationError
 
 
 class ApiError(Exception):
-    def __init__(self, status_code: int, message: str, details: Any | None = None) -> None:
+    def __init__(self, status_code: int, message: str, details: Any | None = None, extra: dict | None = None) -> None:
         self.status_code = status_code
         self.message = message
         self.details = details
+        self.extra = extra or {}
         super().__init__(message)
 
 
@@ -22,6 +23,8 @@ def register_error_handlers(app) -> None:
         payload = {"message": exc.message}
         if exc.details is not None:
             payload["details"] = exc.details
+        if exc.extra:
+            payload.update(exc.extra)
         return jsonify(payload), exc.status_code
 
     @app.errorhandler(ValidationError)

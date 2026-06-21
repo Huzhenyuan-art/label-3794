@@ -1,3 +1,4 @@
+import base64
 from datetime import timedelta
 
 from flask import Blueprint, current_app, jsonify, request
@@ -8,6 +9,7 @@ from ..extensions import db
 from ..models import Admin, LoginAudit, beijing_now
 from ..schemas import LoginPayload
 from ..security import admin_required, generate_csrf_token, verify_password
+from ..services.captcha_service import CAPTCHA_THRESHOLD, create_captcha, verify_captcha
 from ..services.notification_service import NOTIFICATION_TYPES, create_notification
 from ..utils import json_success, to_iso
 
@@ -19,10 +21,36 @@ def _record_login_audit(username: str, success: bool, reason: str | None, ip: st
     db.session.add(LoginAudit(username=username, success=success, reason=reason, ip_address=ip))
 
 
+def _handle_failed_attempt(admin: Admin, username: str, reason: str, ip: str) -> None:
+    admin.failed_login_attempts += 1
+    now = beijing_now()
+    final_reason = reason
+    if admin.failed_login_attempts >= current_app.config["MAX_LOGIN_ATTEMPTS"]:
+        admin.locked_until = now + timedelta(minutes=current_app.config["LOGIN_LOCK_MINUTES"])
+        final_reason = "连续登录失败，账号已临时锁定"
+        create_notification(
+            notification_type=NOTIFICATION_TYPES["ACCOUNT_LOCKED"],
+            title="管理员账号被锁定",
+            content=f"管理员账号「{admin.username}」因连续登录失败次数过多，已被临时锁定至 {to_iso(admin.locked_until)}。",
+            admin_id=admin.id,
+        )
+
+    _record_login_audit(username, False, final_reason, ip)
+
+
+@bp.get("/admin/captcha")
+def admin_captcha():
+    captcha_id, image_bytes = create_captcha()
+    image_base64 = base64.b64encode(image_bytes).decode("ascii")
+    data_url = f"data:image/png;base64,{image_base64}"
+    return jsonify(json_success({"captcha_id": captcha_id, "image": data_url}, "验证码已生成"))
+
+
 @bp.post("/admin/login")
 def admin_login():
     payload = LoginPayload.model_validate(request.get_json(silent=True) or {})
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    threshold = current_app.config.get("CAPTCHA_REQUIRED_THRESHOLD", CAPTCHA_THRESHOLD)
 
     admin = Admin.query.filter_by(username=payload.username).first()
     now = beijing_now()
@@ -30,29 +58,38 @@ def admin_login():
     if not admin:
         _record_login_audit(payload.username, False, "用户不存在", ip)
         db.session.commit()
-        raise ApiError(401, "用户名或密码错误")
+        raise ApiError(401, "用户名或密码错误", extra={"require_captcha": False})
 
     if admin.locked_until and admin.locked_until > now:
         _record_login_audit(payload.username, False, "账号已锁定", ip)
         db.session.commit()
-        raise ApiError(423, f"登录失败次数过多，请于 {to_iso(admin.locked_until)} 后重试")
+        raise ApiError(
+            423,
+            f"登录失败次数过多，请于 {to_iso(admin.locked_until)} 后重试",
+            extra={"require_captcha": True},
+        )
 
-    if not verify_password(payload.password, admin.password_hash):
-        admin.failed_login_attempts += 1
-        reason = "密码错误"
-        if admin.failed_login_attempts >= current_app.config["MAX_LOGIN_ATTEMPTS"]:
-            admin.locked_until = now + timedelta(minutes=current_app.config["LOGIN_LOCK_MINUTES"])
-            reason = "连续登录失败，账号已临时锁定"
-            create_notification(
-                notification_type=NOTIFICATION_TYPES["ACCOUNT_LOCKED"],
-                title="管理员账号被锁定",
-                content=f"管理员账号「{admin.username}」因连续登录失败次数过多，已被临时锁定至 {to_iso(admin.locked_until)}。",
-                admin_id=admin.id,
+    if admin.failed_login_attempts >= threshold:
+        if not verify_captcha(payload.captcha_id, payload.captcha_code):
+            _handle_failed_attempt(admin, payload.username, "验证码错误", ip)
+            db.session.commit()
+            remaining = current_app.config["MAX_LOGIN_ATTEMPTS"] - admin.failed_login_attempts
+            raise ApiError(
+                401,
+                "验证码错误" if remaining > 0 else "连续登录失败，账号已临时锁定",
+                extra={"require_captcha": True},
             )
 
-        _record_login_audit(payload.username, False, reason, ip)
+    if not verify_password(payload.password, admin.password_hash):
+        _handle_failed_attempt(admin, payload.username, "密码错误", ip)
         db.session.commit()
-        raise ApiError(401, "用户名或密码错误")
+        need_captcha = admin.failed_login_attempts >= threshold
+        remaining = current_app.config["MAX_LOGIN_ATTEMPTS"] - admin.failed_login_attempts
+        raise ApiError(
+            401,
+            "用户名或密码错误" if remaining > 0 else "连续登录失败，账号已临时锁定",
+            extra={"require_captcha": need_captcha},
+        )
 
     admin.failed_login_attempts = 0
     admin.locked_until = None

@@ -32,6 +32,7 @@ class Config:
 
     MAX_LOGIN_ATTEMPTS = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))
     LOGIN_LOCK_MINUTES = int(os.getenv("LOGIN_LOCK_MINUTES", "15"))
+    CAPTCHA_REQUIRED_THRESHOLD = int(os.getenv("CAPTCHA_REQUIRED_THRESHOLD", "2"))
 
     UPLOAD_ROOT = os.path.join(BASE_DIR, "static", "pages")
 

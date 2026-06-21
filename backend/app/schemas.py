@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, field_validator
 class LoginPayload(BaseModel):
     username: str = Field(min_length=3, max_length=64)
     password: str = Field(min_length=6, max_length=128)
+    captcha_id: str | None = Field(default=None, max_length=64)
+    captcha_code: str | None = Field(default=None, max_length=16)
 
 
 class UserCreatePayload(BaseModel):
